@@ -151,7 +151,7 @@ def car_params(cfg, designs):
     v_top = cfg.v_max * f.top_speed
     return types.SimpleNamespace(
         v_top=v_top, a_trac=v.a_max * f.accel, power=power, drag=power / v_top ** 3,
-        brake=v.a_max * f.brake, grip=f.grip, steer=f.steer,
+        brake=cfg.engine.brake_max * f.brake, grip=f.grip, steer=f.steer,
         ers_capacity=cfg.ers.capacity_s * f.ers, ers_harvest=cfg.ers.harvest_rate * f.ers, ers_drain=f.ers_drain)
 
 

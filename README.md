@@ -66,7 +66,7 @@ The network is defined in [`racer/agent.py`](racer/agent.py) (`Actor`, `TwinCrit
 
 Not to scale: the car is about 5 m long and the lidar reaches 390 m. The beams are drawn at their real angles and ray-cast against the walls and three other cars.
 
-1. **Lidar, 50 beams.** The simulator casts 108 beams over 270°, reaching 390 m (about 1.35 × the stopping distance of the fastest car). The network gets 50 of them: every beam within ±25° of straight ahead, every 2nd out to ±60°, every 4th out to ±132.5°. Each beam gives a distance and a closing speed.
+1. **Lidar, 50 beams.** The simulator casts 108 beams over 270°, reaching 390 m (about 2 × the stopping distance of the fastest car). The network gets 50 of them: every beam within ±25° of straight ahead, every 2nd out to ±60°, every 4th out to ±132.5°. Each beam gives a distance and a closing speed.
 2. **Cars in the beams.** Beams that hit another car (red) shrink fast when that car brakes. The closing speed is how the driver notices.
 3. **Track preview.** The direction of the track at 25, 50, 100, 150, 200, 300 and 470 m ahead, relative to the car. It knows a corner is coming even when cars block the lidar.
 4. **Mirror.** The nearest car behind within 60 m and 10 m to either side: distance, closing speed and side. It covers the lidar's 90° blind spot behind (shaded).
@@ -135,7 +135,7 @@ In training, 80% of the cars get a random legal design and 20% the stock car (3-
 |---|---|---|
 | Steer | −1…+1 | A share of the steering the tyres can take at this speed, so full lock does not spin the car by itself |
 | Throttle | above 0 counts | Engine power; letting off adds engine braking |
-| Brake | above 0 counts | Braking force; off the throttle, brakes and engine braking together reach 120% |
+| Brake | above 0 counts | Braking force; off the throttle, brakes and engine braking together reach 140% |
 | DRS | above 0 opens | Opens the rear wing in a DRS zone when armed: +6% top speed. Stays open until the driver brakes or the zone ends |
 | ERS | above 0 deploys | +25% engine power from a 10-second battery that recharges under braking |
 
@@ -160,8 +160,8 @@ Training uses TD3, a reinforcement learning method for continuous controls ([`tr
 
 ## Physics and race rules
 
-- **Car:** the F1TENTH kinematic single-track model at F1 scale. Stock top speed 86.1 m/s (310 km/h); grip from 1.8 g up to 5 g with downforce. Braking and cornering share the tyre's grip (traction circle).
-- **Engine braking:** off the throttle the car slows by half its full braking, and brakes plus engine braking reach 120%.
+- **Car:** the F1TENTH kinematic single-track model at F1 scale. Stock top speed 86.1 m/s (310 km/h); grip from 1.8 g up to 5 g with downforce. Traction 27 m/s² (below 126 km/h, then power-limited), full braking 30 m/s². Braking and cornering share the tyre's grip (traction circle), keeping at least 25% of the cornering grip.
+- **Engine braking:** off the throttle the car slows by half its full braking, and brakes plus engine braking reach 140%.
 - **Slipstream:** within 120 m behind another car, up to +10% top speed and extra pull.
 - **DRS:** zones on straights of at least 200 m, ending about 200 m before the next corner. A car is armed when it passes the detection point (the exit of the final corner) less than 1 s behind the car ahead, backmarkers included, from 30 s into the race.
 - **ERS:** a 10-second battery, 85% charged at the start. It recharges under braking, 1.5× faster for a lap after passing the detection point within 1 s of the car ahead.

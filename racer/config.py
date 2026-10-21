@@ -255,6 +255,8 @@ class Settings:
 
         if not 0.0 <= self.engine.brake_share <= 1.0 or self.engine.brake_limit < 1.0:
             raise ValueError("[engine] brake_share must be within 0..1 and brake_limit >= 1")
+        if self.engine.brake_max <= 0.0:
+            raise ValueError("[engine] brake_max (full braking) must be > 0")
 
         t = self.td3
         if t.replay_size < t.batch or t.host_replay_size < 0 or t.host_replay_margin_gb < 0:
