@@ -1,0 +1,141 @@
+{
+ "score": 4.341269841269842,
+ "best_by": "points",
+ "per_map": {
+  "Spielberg": 5.095238095238096,
+  "Monza": 5.476190476190477,
+  "Silverstone": 3.4761904761904763,
+  "Spa": 5.190476190476191,
+  "Zandvoort": 5.761904761904762,
+  "Catalunya": 1.0476190476190477
+ },
+ "distance": 6668.271134193944,
+ "updates": 86905010,
+ "env_steps": 6362561,
+ "cars": "22",
+ "eval_cars": 22,
+ "opponents": [
+  "middle",
+  "aggressive"
+ ],
+ "signature": {
+  "obs_dim": 133,
+  "layout": "racer-v2-133obs-5act",
+  "hidden": 384,
+  "v_max": 86.1,
+  "lidar_range": 390.0,
+  "track_preview_m": [
+   25.0,
+   50.0,
+   100.0,
+   150.0,
+   200.0,
+   300.0,
+   470.0
+  ],
+  "design": {
+   "categories": [
+    "engine",
+    "battery",
+    "chassis",
+    "brakes",
+    "wing"
+   ],
+   "levels": [
+    1,
+    5
+   ],
+   "stock": [
+    3,
+    3,
+    3,
+    3,
+    3
+   ],
+   "max_points": 17,
+   "step": 0.05,
+   "max_change": 0.15,
+   "train_stock_share": 0.2
+  },
+  "physics": {
+   "steering_scaled": true,
+   "traction_circle": true,
+   "combined_floor": 0.2
+  },
+  "episode_steps": 3000,
+  "cars": [
+   22
+  ],
+  "profile": "defensive",
+  "map_scale": 12,
+  "eval_maps": [
+   "Spielberg",
+   "Monza",
+   "Silverstone",
+   "Spa",
+   "Zandvoort",
+   "Catalunya"
+  ],
+  "score": [
+   "place-points",
+   {
+    "pass_bonus": 0.0,
+    "crashed_pass_bonus": 0.0,
+    "passed_penalty": 4.0,
+    "fastest_lap_bonus": 0.0,
+    "pace_bonus": 0.0,
+    "place_weight": 0.0,
+    "f1_weight": 1.0,
+    "finish_floor": 0.0
+   }
+  ],
+  "grid": [
+   12.0,
+   2,
+   8.0,
+   10.0,
+   60.0
+  ],
+  "launch_s": 2.0,
+  "tow": {
+   "boost": 0.1,
+   "accel": 10.0,
+   "full_dist": 15.0,
+   "max_dist": 120.0,
+   "full_width": 1.5,
+   "width": 3.0,
+   "min_speed": 20.0
+  },
+  "drs": {
+   "zone_max_turn_deg": 4.0,
+   "zone_lookahead_m": 200.0,
+   "min_zone_length_m": 200.0,
+   "gap_s": 1.0,
+   "from_s": 30.0,
+   "min_speed": 20.0,
+   "boost": 0.06,
+   "accel": 2.0,
+   "grip_loss": 0.4,
+   "latch": true
+  },
+  "ers": {
+   "capacity_s": 10.0,
+   "start_charge": 0.85,
+   "power_boost": 0.25,
+   "harvest_rate": 1.0,
+   "close_harvest_rate": 1.5,
+   "close_gap_s": 1.0
+  },
+  "engine": {
+   "brake_share": 0.5,
+   "brake_limit": 1.2
+  },
+  "opponents": [
+   "middle@72515424",
+   "aggressive@92847450"
+  ],
+  "self_share": 0.3333,
+  "eval_grids": 3,
+  "front_slots": 0
+ }
+}

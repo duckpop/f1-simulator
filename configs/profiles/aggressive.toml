@@ -1,0 +1,12 @@
+description = "Bold in traffic, disciplined alone: bigger passes, car contact cheap, walls cost what they cost middle."
+[rewards]
+overtake = 40.0           # (was 35) a bit more eager to pass
+overtaken = 40.0          # must be >= overtake
+car_crash = -45.0          # (was -30) contact still cheaper than middle's -70, no longer half price
+car_close_call = 0.0
+steer_change = 0.0
+fastest_sector_lap = 0.0
+sector_record = 0.0
+[eval_bonus]
+pass_bonus = 3.0
+crashed_pass_bonus = 0.0   # (was 3) passes by cars that crash later don't count toward the best pick

@@ -1,0 +1,6 @@
+[submodule "f1tenth_gym"]
+	path = f1tenth_gym
+	url = https://github.com/duckpop/f1tenth_gym.git
+[submodule "maps/f1tenth_racetracks"]
+	path = maps/f1tenth_racetracks
+	url = https://github.com/f1tenth/f1tenth_racetracks.git

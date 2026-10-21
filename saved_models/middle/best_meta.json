@@ -1,0 +1,118 @@
+{
+ "score": 8191.467500755995,
+ "best_by": "distance",
+ "per_map": {
+  "Spielberg": 8341.543260179726,
+  "Monza": 9122.713381538544,
+  "Silverstone": 7558.049802155021,
+  "Spa": 8383.97818951406,
+  "Zandvoort": 7269.331430880664,
+  "Catalunya": 8473.188940267954
+ },
+ "distance": 8191.467500755995,
+ "updates": 72515424,
+ "env_steps": 27436627,
+ "cars": "22",
+ "eval_cars": 22,
+ "opponents": [],
+ "signature": {
+  "obs_dim": 133,
+  "layout": "racer-v2-133obs-5act",
+  "hidden": 384,
+  "v_max": 86.1,
+  "lidar_range": 390.0,
+  "track_preview_m": [
+   25.0,
+   50.0,
+   100.0,
+   150.0,
+   200.0,
+   300.0,
+   470.0
+  ],
+  "design": {
+   "categories": [
+    "engine",
+    "battery",
+    "chassis",
+    "brakes",
+    "wing"
+   ],
+   "levels": [
+    1,
+    5
+   ],
+   "stock": [
+    3,
+    3,
+    3,
+    3,
+    3
+   ],
+   "max_points": 17,
+   "step": 0.05,
+   "max_change": 0.15,
+   "train_stock_share": 0.2
+  },
+  "physics": {
+   "steering_scaled": true,
+   "traction_circle": true,
+   "combined_floor": 0.2
+  },
+  "episode_steps": 3000,
+  "cars": [
+   22
+  ],
+  "profile": "middle",
+  "map_scale": 12,
+  "eval_maps": [
+   "Spielberg",
+   "Monza",
+   "Silverstone",
+   "Spa",
+   "Zandvoort",
+   "Catalunya"
+  ],
+  "score": "mean-distance",
+  "grid": [
+   12.0,
+   2,
+   8.0,
+   10.0,
+   60.0
+  ],
+  "launch_s": 2.0,
+  "tow": {
+   "boost": 0.1,
+   "accel": 10.0,
+   "full_dist": 15.0,
+   "max_dist": 120.0,
+   "full_width": 1.5,
+   "width": 3.0,
+   "min_speed": 20.0
+  },
+  "drs": {
+   "zone_max_turn_deg": 4.0,
+   "zone_lookahead_m": 200.0,
+   "min_zone_length_m": 200.0,
+   "gap_s": 1.0,
+   "from_s": 30.0,
+   "min_speed": 20.0,
+   "boost": 0.06,
+   "accel": 2.0,
+   "grip_loss": 0.4
+  },
+  "ers": {
+   "capacity_s": 10.0,
+   "start_charge": 0.85,
+   "power_boost": 0.25,
+   "harvest_rate": 1.0,
+   "close_harvest_rate": 1.5,
+   "close_gap_s": 1.0
+  },
+  "engine": {
+   "brake_share": 0.5,
+   "brake_limit": 1.2
+  }
+ }
+}

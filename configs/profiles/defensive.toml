@@ -1,0 +1,22 @@
+description = "Very hard to pass: losing a place costs 90, a pass earns 20, crashes cost 160, every race point held is worth 8 - it takes places and holds them, and avoids contact more than middle."
+[rewards]
+overtake = 20.0
+overtaken = 90.0           # (was 60) losing a place hurts far more than gaining one pays
+per_place = 8.0            # (middle 5) per race point gained/lost: holding a place pays, a crash at the front costs more
+gain_per_m = 0.05
+wall_crash = -160.0        # (was -140)
+car_crash = -160.0         # (was -140)
+car_close_call = 0.2
+wall_close_call = 0.2
+fastest_sector_lap = 10.0
+steer_change = 0.1
+sector_pace = 1.5
+sector_record = 2.5
+[eval_bonus]               # picks the best checkpoint: F1 points (top 10 only) for holding a place in the points
+pass_bonus = 0.0
+passed_penalty = 4.0       # (was 2) per time passed: holding a place counts more than gaining one
+fastest_lap_bonus = 0.0
+pace_bonus = 0.0
+place_weight = 0.0         # below P10 is a loss either way
+f1_weight = 1.0
+finish_floor = 0.0

@@ -1,0 +1,245 @@
+[car]                      # overrides the gym's FULLSCALE_VEHICLE_PARAMETERS
+m = 798.0                  # 2024 F1 minimum weight with driver
+I = 1200.0                 # yaw inertia, kg m^2
+lf = 1.6
+lr = 2.0                   # 3.6 m wheelbase
+h = 0.30
+mu = 1.8
+a_max = 20.0               # ~2 g: engine traction limit (below v_switch) and full brakes
+v_switch = 35.0            # above it the engine is power-limited: a = a_max * v_switch / v
+v_max = 86.1               # 310 km/h, reached when engine accel = drag
+v_min = 0.0                # no reversing
+s_min = -0.6
+s_max = 0.6                # steering angle, rad
+sv_min = -1.5
+sv_max = 1.5               # steering rate, rad/s
+width = 2.0
+length = 5.6
+collision_body_center_x = 1.8
+
+[grip]                     # max sideways accel = 9.81 * min(max_g, base_g + downforce * downforce_g * (v / ref_speed)^2)
+base_g = 1.8
+downforce_g = 3.2
+ref_speed = 70.0
+max_g = 5.0
+steering_scaled = true      # steer output x the available steering: 0 = straight, +-1 = at the grip limit
+traction_circle = true      # braking / accelerating and cornering share the tyre's grip
+combined_floor = 0.2        # lateral grip kept at full braking / full traction
+
+[engine]
+brake_share = 0.5          # engine braking: throttle off slows the car by this share of full braking ...
+brake_limit = 1.2          # ... and brakes + engine braking together reach up to this x full braking (throttle on: 1x)
+
+[sim]
+maps_dir = "maps/f1tenth_racetracks"
+map_scale = 12             # tracks are 2.2 m wide at scale 1: ~26 m wide, laps ~3-6.5 km
+train_maps = "all"         # or a list of names
+map_switch_car_steps = 100000   # a worker changes map + car count after this much training data (+-25%)
+control_dt = 0.05          # 20 Hz policy
+integrator_dt = 0.01
+episode_steps = 3000       # 150 s races (evals, watch, compare, seasons)
+train_race_s = [150.0, 150.0]  # training race length, U(shortest, longest) s; e.g. [40, 150] for more starts per hour (the cut bootstraps like a timeout)
+lidar_noise_std = 0.01
+
+[sensors]
+lidar_beams = 108          # simulated over the FOV
+lidar_fov_deg = 270.0
+lidar_range = 390.0        # ~1.35 x the stopping distance of the fastest legal car (99 m/s at 17 m/s^2: 288 m)
+obs_bands = [[25.0, 1], [60.0, 2], [135.0, 4]]   # (up to |angle| deg, every Nth beam) -> 50 of 108 beams
+mirror_range = 60.0
+mirror_width = 10.0
+track_preview_m = [25.0, 50.0, 100.0, 150.0, 200.0, 300.0, 470.0]   # ~1.6 x that stopping distance at the far end
+alongside_range = 6.0
+max_cars_obs = 22          # the car-count input is divided by this
+
+[spawn]
+grid_probability = 1.0            # share of non-rolling training episodes that start on the grid (was 0.5)
+grid_probability_big_field = 1.0  # ... with big_field+ cars (was 0.8)
+big_field = 12
+grid_slot_gap = 12.0       # m between consecutive cars (8 m left the pack too tight after the launch)
+grid_columns = 2
+grid_column_gap = 8.0      # m between the 2 columns: +-4 m from the centre line (was 6)
+grid_max_turn_deg = 10.0   # the grid must sit on a straight
+grid_clear_ahead = 60.0
+rolling_probability = 0.0  # share of training episodes with 2+ cars (was 0.35; 0 = every training race starts on the grid)
+rolling_gap = [8.0, 16.0]
+rolling_speed = [35.0, 60.0]
+rolling_speed_jitter = 0.05
+rolling_clear_ahead = 150.0
+random_lateral_jitter = 1.0
+random_heading_jitter_deg = 8.0
+random_speed = [0.0, 15.0]
+launch_s = 2.0             # grid starts: full throttle forced for 2 s
+no_progress_timeout_s = 6.0
+no_progress_blocked_gap = 30.0
+
+[variation]                # training episodes only; evals and watching use the normal car
+grip = 0.10                # tyre grip x U(0.9, 1.1), the same for every car on the track
+mass = 0.0                 # (was 0.10) the kinematic model ignores mass: it did nothing
+pace_spread = 0.04         # each car's top speed (engine power) cut by U(0, 4%)
+opponent_speed = 0.95      # frozen opponents' top speed in training (CLI --opponent-speed)
+
+[tow]                      # slipstream
+boost = 0.10               # up to +10% top speed: drag x 1/(1+boost)^3
+accel = 10.0               # up to +10 m/s^2 pull on the throttle
+full_dist = 15.0
+max_dist = 120.0
+full_width = 1.5
+width = 3.0
+min_speed = 20.0
+
+[drs]                      # DRS opens only in zones on the straights (and only within gap_s of the car ahead)
+zone_max_turn_deg = 4.0    # a point is in a DRS zone if the track turns < 4 deg from it to zone_lookahead_m ahead
+zone_lookahead_m = 200.0   # so every zone ends ~200 m before the next corner (the braking distance)
+min_zone_length_m = 200.0  # shorter straights get no zone (was 250: Hockenheim had none)
+gap_s = 1.0                # also armed: passed the detection point (final corner exit) < 1 s behind the previous car (a backmarker too), until the next pass; 0 = any car on a straight
+from_s = 30.0              # not in the first 30 s of a race
+min_speed = 20.0
+boost = 0.06               # +6% top speed while open
+accel = 2.0                # +2 m/s^2 pull while open, on the throttle
+grip_loss = 0.4            # share of the downforce grip lost while open
+latch = true               # once opened it stays open until the car brakes or DRS stops being available (zone end); false = open only while the DRS output is > 0
+
+[ers]                      # a battery per car: deploys extra engine power, recharges under braking
+capacity_s = 10.0          # battery holds 10 s of full deployment (was 4)
+start_charge = 0.85        # share of capacity at a grid start (rolling/random spawns: U(0.2, 1.0)); was 0.5
+power_boost = 0.25         # engine power x 1.25 while deploying (~+7.7% top speed)
+harvest_rate = 1.0         # s of boost gained per s of full braking at top speed (scales with brake x v / v_max); was 0.5: the battery sat under 5% ~90% of the time
+close_harvest_rate = 1.5   # ... instead until the next pass after passing the detection point (final corner exit) ...
+close_gap_s = 1.0          # ... less than this many s behind the previous car (a backmarker too): chasing pays
+
+[design]                   # car designs (racer/design.py)
+categories = ["engine", "battery", "chassis", "brakes", "wing"]
+levels = [1, 5]
+stock = [3, 3, 3, 3, 3]    # the v1 car exactly
+max_points = 17            # 3 per category + 2 free upgrade levels
+step = 0.05                # per level, gains and costs
+max_change = 0.15          # every resulting quantity within +-15% of the stock car
+train_stock_share = 0.2    # share of training cars on the stock car; the rest uniform random legal designs
+designs_file = "configs/designs.toml"
+
+[season]                   # the designer's seasons (racer/season.py)
+teams = 11                 # 2 cars each: 22 cars, 11 designs on track
+races = 23                 # one per track, in a random order each season
+max_moves = 2              # point operations the designer may make before each race
+profiles = ["middle", "aggressive", "defensive"]   # the drivers' styles (one-hot in the designer's inputs)
+
+[designer]                 # the designer's double DQN (train_designer.py)
+hidden = 128
+gamma = 0.9                # per race: a change can pay off over the next races
+lr = 5e-4
+batch = 128
+replay_size = 300000
+updates_per_decision = 1.0
+target_every_updates = 1000      # hard target-network update
+epsilon = [1.0, 0.05]            # epsilon-greedy, decaying linearly ...
+epsilon_decay_decisions = 300000 # ... over this many decisions (~4 h at ~80k an hour)
+warmup_decisions = 5000          # random operations before learning starts
+publish_every_updates = 100
+total_decisions = 2000000
+workers = 9                # season workers producing data (plus one per test season)
+test_seasons = 3           # fixed test seasons per check, raced in parallel
+test_seed = 2024
+save_every_updates = 20000
+keep_last = 5
+
+[race]
+overtake_margin = 2.0      # an order change counts only once the gap is > 2 m (hysteresis)
+pass_hold_s = 1.0          # a pass pays once held 1 s with both cars racing
+start_phase_s = 30.0
+detection_from_s = 30.0    # DRS / ERS chase-recharge detection counts from here: the first check is at the end of lap 1
+detection_turn_deg = 30.0  # detection point = the exit of the final corner (the last bend of at least this much before the line)
+start_overtake_mult = 1.0  # (was 1.5) passes in the first 30 s of a grid start pay this x: 1 = no start bonus (it caused first-lap lunges)
+gain_range = 150.0
+lap_sectors = 10
+sector_pace_window = 0.05
+close_call_ttc = 0.4
+close_call_min_closing = 1.0
+
+[rewards]                  # middle's values; profiles override any of these
+progress_weight = 1.0      # x metres of progress x 1 / (v_max * control_dt): top speed for a step = +1
+wall_crash = -70.0         # crash into a wall, or no progress (terminal)
+car_crash = -70.0          # crash into another car (terminal)
+per_place = 5.0            # per race point gained/lost, paid as it changes
+overtake = 20.0
+overtaken = 20.0           # must be >= overtake (otherwise two cars farm points by swapping)
+gain_per_m = 0.1
+car_close_call = 0.15
+wall_close_call = 0.15
+steer_change = 0.05        # x |change of the steering output| per step
+fastest_sector_lap = 20.0  # per lap: purple sectors pay this / lap_sectors each
+sector_pace = 3.0
+sector_record = 5.0
+
+[eval_bonus]               # added to place points in evals with opponents; profiles override
+pass_bonus = 1.0           # per pass on an opponent's car, finishing cars
+crashed_pass_bonus = 0.0   # per pass on an opponent's car, cars that crashed later
+passed_penalty = 0.0       # per time passed by an opponent's car, finishing cars
+fastest_lap_bonus = 3.0    # the race's fastest lap, by a finishing car of the trained brain
+pace_bonus = 1.0           # per race: its best lap beats the opponents' best lap
+place_weight = 1.0         # x the place points of a finishing car (P1 = cars ... last = 1)
+f1_weight = 0.0            # x the F1 points of a finishing car (25-18-15-12-10-8-6-4-2-1 for P1-P10)
+finish_floor = 1.0         # a finishing car never scores below this
+
+[td3]
+hidden = 384               # 512 halves updates/s on the laptop GPU
+gamma = 0.99               # ~5 s horizon at 20 Hz; longer makes every style MORE careful
+n_step = 3
+tau = 0.005
+policy_noise = 0.2
+noise_clip = 0.5
+policy_freq = 2
+batch = 256
+lr_actor = 3e-4
+lr_critic = 3e-4           # --lr 1e-4 to fine-tune a trained driver
+replay_size = 6400000      # on the GPU (fp16): ~3.4 GB at 133 inputs - about all a 4 GB card has beside the networks
+host_replay_size = 12000000      # up to this many more in RAM: one ring with the GPU part, sampled uniformly over both ...
+host_replay_margin_gb = 2.0      # ... grown only while at least this much RAM stays available (0 rows: GPU only)
+updates_per_transition = 0.25
+allow_tf32 = true
+warmup_steps = 20000                # fresh run: random actions first
+resume_warmup_steps = 1000000       # resume: refill with the loaded driver
+resume_critic_only_updates = 150000 # then train only the critic
+actor_lr_ramp_updates = 100000      # then ramp the actor's lr 0 -> full
+exploration_sigma = [0.03, 0.4]     # per car per episode, log-uniform
+exploration_correlation = 0.8       # AR(1) between steps
+
+[workers]
+count = 6                  # max(1, min(6, cpu_count - 4)) if left out
+transition_chunk = 64
+policy_refresh_steps = 100
+publish_every_updates = 250
+self_share = 0.3333        # with --opponents: the trained brain's share of each grid (>= 1 car)
+front_slots = 0            # with --opponents: the brain's cars start in the first N grid / pack slots (0 = anywhere)
+default_cars = [3]
+
+[eval]
+maps = ["Spielberg", "Monza", "Silverstone", "Spa", "Zandvoort", "Catalunya"]
+grids = 3                  # with opponents: races per map, the brain's cars on different slots
+every_publishes = 40       # a round starts after this many new policy versions (or right after the last)
+
+[run]
+total_steps = 3000000
+save_every_updates = 50000
+keep_last = 5              # periodic checkpoints a run keeps (its own only)
+save_dir = "saved_models"  # v2; the v1 drivers are in saved_models_v1/ (v1 code only: other layout)
+default_profile = "middle"
+resume_tag = "best"        # what a bare --resume loads
+log_every_s = 60.0
+dashboard = true
+dashboard_refresh_s = 2.0
+write_logs = true
+
+[watch]
+tag = "best"
+map = "Spielberg"
+profiles = ["middle"]
+cars = 3
+episodes = 5
+random_spawn = false
+playback_speed = 3.0
+
+[colors]                   # per profile, window + console; never red (crashed cars turn red)
+middle = "#377eb8"
+aggressive = "#ff7f00"
+defensive = "#4daf4a"

@@ -1,0 +1,163 @@
+{
+ "Austin": {
+  "cars": 12,
+  "date": "2026-10-18 11:41",
+  "lap_s": 92.017,
+  "source": "training",
+  "updates": 66324930
+ },
+ "BrandsHatch": {
+  "cars": 6,
+  "date": "2026-10-19 09:36",
+  "lap_s": 59.242,
+  "source": "training",
+  "updates": 86585506
+ },
+ "Budapest": {
+  "cars": 12,
+  "date": "2026-10-19 00:38",
+  "lap_s": 77.589,
+  "source": "training",
+  "updates": 93739544
+ },
+ "Catalunya": {
+  "cars": 6,
+  "date": "2026-10-18 17:37",
+  "lap_s": 75.931,
+  "source": "training",
+  "updates": 88079592
+ },
+ "Hockenheim": {
+  "cars": 6,
+  "date": "2026-10-18 14:50",
+  "lap_s": 72.213,
+  "source": "training",
+  "updates": 77849442
+ },
+ "IMS": {
+  "cars": 22,
+  "date": "2026-10-18 11:47",
+  "lap_s": 35.679,
+  "source": "training",
+  "updates": 66739498
+ },
+ "Melbourne": {
+  "cars": 6,
+  "date": "2026-10-19 11:58",
+  "lap_s": 84.955,
+  "source": "training",
+  "updates": 95212748
+ },
+ "MexicoCity": {
+  "cars": 18,
+  "date": "2026-10-18 14:53",
+  "lap_s": 70.075,
+  "source": "training",
+  "updates": 78058558
+ },
+ "Montreal": {
+  "cars": 12,
+  "date": "2026-10-18 21:50",
+  "lap_s": 66.835,
+  "source": "training",
+  "updates": 83234374
+ },
+ "Monza": {
+  "cars": 12,
+  "date": "2026-10-18 14:08",
+  "lap_s": 71.569,
+  "source": "training",
+  "updates": 75297858
+ },
+ "MoscowRaceway": {
+  "cars": 6,
+  "date": "2026-10-18 12:22",
+  "lap_s": 75.388,
+  "source": "training",
+  "updates": 68851750
+ },
+ "Nuerburgring": {
+  "cars": 12,
+  "date": "2026-10-18 16:21",
+  "lap_s": 89.278,
+  "source": "training",
+  "updates": 83368254
+ },
+ "Oschersleben": {
+  "cars": 18,
+  "date": "2026-10-18 14:39",
+  "lap_s": 56.959,
+  "source": "training",
+  "updates": 77206102
+ },
+ "Sakhir": {
+  "cars": 12,
+  "date": "2026-10-18 23:11",
+  "lap_s": 88.368,
+  "source": "training",
+  "updates": 88293182
+ },
+ "SaoPaulo": {
+  "cars": 22,
+  "date": "2026-10-18 22:54",
+  "lap_s": 67.949,
+  "source": "training",
+  "updates": 87222456
+ },
+ "Sepang": {
+  "cars": 12,
+  "date": "2026-10-19 09:52",
+  "lap_s": 94.175,
+  "source": "training",
+  "updates": 87553794
+ },
+ "Shanghai": {
+  "cars": 12,
+  "date": "2026-10-18 12:22",
+  "lap_s": 97.13,
+  "source": "training",
+  "updates": 68856788
+ },
+ "Silverstone": {
+  "cars": 6,
+  "date": "2026-10-18 13:32",
+  "lap_s": 86.699,
+  "source": "training",
+  "updates": 73154658
+ },
+ "Sochi": {
+  "cars": 12,
+  "date": "2026-10-18 13:51",
+  "lap_s": 92.395,
+  "source": "training",
+  "updates": 74278744
+ },
+ "Spa": {
+  "cars": 12,
+  "date": "2026-10-18 21:25",
+  "lap_s": 101.563,
+  "source": "training",
+  "updates": 81655894
+ },
+ "Spielberg": {
+  "cars": 6,
+  "date": "2026-10-19 07:38",
+  "lap_s": 64.584,
+  "source": "training",
+  "updates": 79224724
+ },
+ "YasMarina": {
+  "cars": 18,
+  "date": "2026-10-18 12:12",
+  "lap_s": 91.996,
+  "source": "training",
+  "updates": 68273706
+ },
+ "Zandvoort": {
+  "cars": 18,
+  "date": "2026-10-18 20:46",
+  "lap_s": 76.827,
+  "source": "training",
+  "updates": 79186902
+ }
+}

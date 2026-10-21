@@ -1,0 +1,47 @@
+# Car designs for watch.py / compare.py --designs (season.py --save-designs writes this file).
+# Levels per category, in this order: engine, battery, chassis, brakes, wing; each 1-5, at most 17 points in total.
+# A hand-made starting set: one car per idea, until a trained designer's season replaces it.
+
+[[team]]
+name = "Power"
+design = [5, 3, 3, 3, 3]
+
+[[team]]
+name = "Grip"
+design = [3, 3, 5, 3, 3]
+
+[[team]]
+name = "Stoppers"
+design = [3, 3, 3, 5, 3]
+
+[[team]]
+name = "Low drag"
+design = [3, 3, 3, 3, 5]
+
+[[team]]
+name = "Hybrid"
+design = [3, 5, 3, 3, 3]
+
+[[team]]
+name = "Balanced"
+design = [4, 3, 4, 3, 3]
+
+[[team]]
+name = "Straight-line"
+design = [5, 3, 2, 3, 4]
+
+[[team]]
+name = "Deployers"
+design = [4, 4, 3, 3, 3]
+
+[[team]]
+name = "Late brakers"
+design = [3, 3, 4, 4, 3]
+
+[[team]]
+name = "Top speed"
+design = [5, 5, 2, 1, 4]
+
+[[team]]
+name = "Stock"
+design = [3, 3, 3, 3, 3]

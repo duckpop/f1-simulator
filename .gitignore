@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+saved_models_v1/
+
+# Trained drivers: only each profile's best checkpoint, its eval record and lap records are kept in git
+saved_models/*/*
+!saved_models/*/td3_best.pt
+!saved_models/*/best_meta.json
+!saved_models/*/lap_records.json

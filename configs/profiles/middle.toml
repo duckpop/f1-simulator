@@ -1,0 +1,3 @@
+description = "The baseline racer: passes when the risk is small. Trained first, from scratch; the other styles start from it."
+[rewards]
+[eval_bonus]

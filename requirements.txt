@@ -1,0 +1,3 @@
+# The simulator (fork of the F1TENTH gym, a git submodule) brings numpy, numba, torch, gymnasium, PyQt6, ...
+-e ./f1tenth_gym
+rich>=13
