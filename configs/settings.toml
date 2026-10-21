@@ -5,7 +5,7 @@ lf = 1.6
 lr = 2.0                   # 3.6 m wheelbase
 h = 0.30
 mu = 1.8
-a_max = 20.0               # ~2 g: engine traction limit (below v_switch) and full brakes
+a_max = 27.0               # ~2.75 g: engine traction limit (below v_switch); engine power = a_max x v_switch (was 20, also the brakes: now [engine] brake_max)
 v_switch = 35.0            # above it the engine is power-limited: a = a_max * v_switch / v
 v_max = 86.1               # 310 km/h, reached when engine accel = drag
 v_min = 0.0                # no reversing
@@ -24,11 +24,12 @@ ref_speed = 70.0
 max_g = 5.0
 steering_scaled = true      # steer output x the available steering: 0 = straight, +-1 = at the grip limit
 traction_circle = true      # braking / accelerating and cornering share the tyre's grip
-combined_floor = 0.2        # lateral grip kept at full braking / full traction
+combined_floor = 0.25       # lateral grip kept at full braking / full traction (was 0.2)
 
 [engine]
+brake_max = 30.0           # full braking, m/s^2 (~3 g; was a_max = 20)
 brake_share = 0.5          # engine braking: throttle off slows the car by this share of full braking ...
-brake_limit = 1.2          # ... and brakes + engine braking together reach up to this x full braking (throttle on: 1x)
+brake_limit = 1.4          # ... and brakes + engine braking together reach up to this x full braking (throttle on: 1x; was 1.2)
 
 [sim]
 maps_dir = "maps/f1tenth_racetracks"
@@ -44,11 +45,11 @@ lidar_noise_std = 0.01
 [sensors]
 lidar_beams = 108          # simulated over the FOV
 lidar_fov_deg = 270.0
-lidar_range = 390.0        # ~1.35 x the stopping distance of the fastest legal car (99 m/s at 17 m/s^2: 288 m)
+lidar_range = 390.0        # ~2 x the stopping distance of the fastest legal car (99 m/s at 25.5 m/s^2: 192 m)
 obs_bands = [[25.0, 1], [60.0, 2], [135.0, 4]]   # (up to |angle| deg, every Nth beam) -> 50 of 108 beams
 mirror_range = 60.0
 mirror_width = 10.0
-track_preview_m = [25.0, 50.0, 100.0, 150.0, 200.0, 300.0, 470.0]   # ~1.6 x that stopping distance at the far end
+track_preview_m = [25.0, 50.0, 100.0, 150.0, 200.0, 300.0, 470.0]   # ~2.4 x that stopping distance at the far end
 alongside_range = 6.0
 max_cars_obs = 22          # the car-count input is divided by this
 
