@@ -13,11 +13,11 @@ and a scripted principal calls the pit stops. Phases 3 (principals) and 4 (desig
 | 0. Training repo: f1env pinned, tests, a config per profile | done |
 | 1. TQC agent in JAX, checked on a standard control task first | done (pendulum: -131 per episode, random -1,200) |
 | 2. Replay buffer on the GPU: float16, n-step returns | done |
-| 3. Training setup: random upgrades per car, the training principal, race sampler | done (races; qualifying sessions come with stage B) |
+| 3. Training setup: random upgrades per car, the training principal, race and session sampler | done (20% qualifying sessions in stage B) |
 | 4. Rewards: common and style terms, each logged | done |
 | 5. Stage A: alone, on the track-width curriculum | runs on the laptop; the real runs are for the cluster |
-| 6. Stage B: full grid, mixed profiles, frozen snapshots | to do |
-| 7. Eval harness | the "alone" test done; the mixed season and style metrics to do |
+| 6. Stage B: full grid, mixed profiles, frozen snapshots | runs on the laptop (smoke runs); the real runs are for the cluster |
+| 7. Eval harness | the "alone" test and mixed 22-car races per profile; full weekends in a 24-race season to do |
 | 8. Results against v2 | to do |
 
 ## Install
@@ -38,14 +38,15 @@ Working on f1env at the same time? Install your local copy over the pinned one: 
 f1sim-check-tqc                                   # TQC on the pendulum swing-up: a few minutes, should pass
 f1env-tracks --out tracks --train 500 --eval 10   # the track pool, with the wide copies (once)
 f1sim-train --profile middle --tracks tracks --preset cluster
-f1sim-train --profile smooth --tracks tracks --preset cluster    # starts from Middle's best
+f1sim-train --profile smooth --tracks tracks --preset cluster    # starts from Middle's best (and the other two)
 f1sim-eval --checkpoint runs/middle/stage-a/best.npz --tracks tracks --laps 50
+f1sim-train-b --tracks tracks --preset cluster    # stage B: all four together, each from its stage A best
 ```
 
 Without a pool, `--generate N` makes N training tracks on the spot (and the eval tracks from their seeds), for small
 runs: `f1sim-train --profile middle --generate 4 --eval-tracks 2 --widths normal --steps 20000`.
 
-`pytest -q` runs the tests (~2 minutes); `pytest -m slow` adds the pendulum check.
+`pytest -q` runs the tests (~3 minutes); `pytest -m slow` adds the pendulum check.
 
 ## The brain: TQC
 
@@ -96,6 +97,22 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
 tracks, moving on when the eval at that width stops improving. Middle trains first, from scratch; the other three start
 from its best stage A networks with their own settings and rewards.
 
+**Stage B** (`stage_b.py`): 22 cars per race on the 12-15 m tracks, with overtaking, dirty air, slipstream, DRS,
+contact, the safety car and blue flags.
+
+- Seats are fixed by car number (the grid is random every race): 4 cars of each profile learn (16), team-mates are
+  different profiles, and the other 6 cars (27%) drive frozen snapshots.
+- Each profile keeps its own networks, optimisers and replay buffer. One batch of races trains all four: each car's
+  steps go to its profile's buffer with its profile's reward weights, and every profile takes its gradient steps each
+  environment step.
+- The snapshot pool (8) starts with the four stage A bests and takes a copy of one profile's current actor, in turn,
+  every 100k steps. A frozen car drives one snapshot (its mean action) for a whole session.
+- 20% of sessions are 12-minute qualifying sessions: every car starts in its garage and goes out twice on new softs
+  (f1env's default runs), so flying laps and the "session" input get learned. A run ends when the car parks.
+- The eval races the four current profiles against each other on the eval tracks (5-6 cars each, the default car, no
+  respawn): points per race, finish rate, out on lap 1, crashes per lap, overtakes, places lost and time held under
+  attack. Each profile keeps its best checkpoint (most points per race) in `runs/<profile>/stage-b/best.npz`.
+
 ## Rewards
 
 `src/f1sim/drivers/rewards.py`. Each term is measured in its own unit and weighted by its base value
@@ -135,6 +152,8 @@ Choices made while building (open points in the spec):
 - The environment alone: ~900 steps/s at 4 races x 1 car (~1.1 ms per step, the lidar included).
 - Stage A training with the full-size brain: ~145 environment steps/s at 8 races (1,200 transitions/s, one gradient
   step per environment step). The gradient step is the cost; the cluster preset runs 64 races.
+- Stage B: ~35 environment steps/s at 4 races x 22 cars (~3,000 car-steps/s), each step followed by a gradient step for
+  each of the four profiles. Compiling the four learners and the full grid takes about a minute.
 
 ## What's where
 
@@ -146,6 +165,6 @@ Choices made while building (open points in the spec):
 | `src/f1sim/loop.py` | collect-and-learn, jit-compiled over many steps |
 | `src/f1sim/pendulum.py` | the pendulum check (`f1sim-check-tqc`) |
 | `src/f1sim/checkpoint.py` | checkpoints as .npz plus a JSON record |
-| `src/f1sim/drivers/` | the training environment, principal, rewards, configs, tracks, stage A training, evals |
+| `src/f1sim/drivers/` | the training environment, principal, rewards, configs, tracks, stage A (`train.py`) and stage B (`stage_b.py`) training, evals |
 | `configs/` | shared settings, machine presets, the four profiles |
 | `tests/` | unit tests for each part |

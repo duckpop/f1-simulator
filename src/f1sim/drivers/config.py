@@ -27,6 +27,7 @@ class Settings:
     styles: dict  # the profile's multiplier per style term
     start_from: str  # the profile whose stage A networks this one starts from ("": from scratch)
     stage_a: dict
+    stage_b: dict
     preset: dict
 
 
@@ -80,5 +81,6 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
         styles=styles,
         start_from=own.get("start_from", ""),
         stage_a=shared["stage_a"],
+        stage_b=shared["stage_b"],
         preset=p,
     )

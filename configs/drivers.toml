@@ -45,6 +45,14 @@ widths = ["26", "20", "normal"]    # m; "normal" is the 12-15 m tracks
 patience = 3                # evals without a better eval before moving on to the next width
 warmup = 10_000             # transitions before the first update: random actions, or the policy when starting from another profile
 
+[stage_b]                   # the full grid, the four profiles learning together
+per_profile = 4             # learning cars per profile: 16 of 22, the other 6 (27%) frozen snapshots
+snapshots = 8               # frozen snapshot pool: starts with the stage A bests
+snapshot_every = 100_000    # environment steps between copies of a profile's actor into the pool (in turn)
+quali_share = 0.2           # sessions that are short qualifying sessions
+quali_s = 720.0             # their length (Q3's 12 minutes), two runs each
+warmup = 10_000             # transitions per profile before the first update
+
 [preset.laptop]             # RTX 3050 Ti, 4 GB: debugging and small runs
 races = 8
 replay = 200_000            # transitions
@@ -55,6 +63,8 @@ eval_every = 25_000         # environment steps
 eval_laps = 5
 eval_seeds = 1
 steps_per_width = 400_000   # at most, environment steps
+races_b = 4                 # stage B: races per batch (x 22 cars)
+steps_b = 200_000
 
 [preset.cluster]            # the real runs
 races = 64
@@ -66,3 +76,5 @@ eval_every = 50_000
 eval_laps = 50
 eval_seeds = 2
 steps_per_width = 5_000_000
+races_b = 64                # ~1,400 cars per step
+steps_b = 5_000_000

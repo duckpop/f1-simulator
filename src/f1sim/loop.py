@@ -36,18 +36,26 @@ class Carry(NamedTuple):
     steps: jax.Array  # environment steps so far
 
 
+def learn(agent: tqc.TQCState, cfg: tqc.TQCConfig, replay: rp.Replay, key, updates: int):
+    """`updates` gradient steps, each on a fresh batch from the replay; the metrics averaged over them."""
+
+    def one(agent, k):
+        k_sample, k_update = jax.random.split(k)
+        batch = rp.sample(replay, k_sample, cfg.batch, cfg.n_step, cfg.gamma)
+        return tqc.update(agent, cfg, batch, k_update)
+
+    agent, m = jax.lax.scan(one, agent, jax.random.split(key, updates))
+    return agent, jax.tree.map(jnp.mean, m)
+
+
+def maybe_learn(on, agent: tqc.TQCState, cfg: tqc.TQCConfig, replay: rp.Replay, key, updates: int):
+    """learn() if `on` (traced), else the agent unchanged and zero metrics."""
+    zeros = {k: jnp.zeros((), jnp.float32) for k in tqc.METRICS}
+    return jax.lax.cond(on, lambda: learn(agent, cfg, replay, key, updates), lambda: (agent, zeros))
+
+
 def make_chunk(env_step, cfg: tqc.TQCConfig, steps: int, updates: int = 1, warmup: int = 0, learn_from: int = 0):
     """warmup: environment steps with uniform random actions; learn_from: environment steps before the first update."""
-    zeros = {k: jnp.zeros((), jnp.float32) for k in tqc.METRICS}
-
-    def learn(agent, replay, key):
-        def one(agent, k):
-            k_sample, k_update = jax.random.split(k)
-            batch = rp.sample(replay, k_sample, cfg.batch, cfg.n_step, cfg.gamma)
-            return tqc.update(agent, cfg, batch, k_update)
-
-        agent, m = jax.lax.scan(one, agent, jax.random.split(key, updates))
-        return agent, jax.tree.map(jnp.mean, m)
 
     def body(args, c: Carry, _):
         key, k_act, k_rand, k_env, k_learn = jax.random.split(c.key, 5)
@@ -56,7 +64,7 @@ def make_chunk(env_step, cfg: tqc.TQCConfig, steps: int, updates: int = 1, warmu
         action = jnp.where(c.steps < warmup, random, policy)
         env, obs, st, info = env_step(*args, c.env, action, k_env)
         buf = rp.add(c.replay, c.obs, action, st.reward, st.valid, st.end)
-        agent, m = jax.lax.cond(c.steps >= learn_from, lambda: learn(c.agent, buf, k_learn), lambda: (c.agent, zeros))
+        agent, m = maybe_learn(c.steps >= learn_from, c.agent, cfg, buf, k_learn, updates)
         m = {**m, "learning": (c.steps >= learn_from).astype(jnp.float32)}
         return Carry(env, obs, agent, buf, key, c.steps + 1), (info, m)
 

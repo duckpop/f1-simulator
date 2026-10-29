@@ -92,3 +92,29 @@ def test_time_limit_cuts_and_restarts_the_race(bank, started):
     assert float(st3.race.clock[1]) < 0 and int(st3.tick[1]) == 0  # a new race on the grid
     assert float(st3.race.clock[0]) > 0 and int(st3.tick[0]) == int(st2.tick[0]) + 1  # the others carry on
     np.testing.assert_array_equal(np.asarray(end)[0, [0, 2], 0], rp.CONTINUE)
+
+
+def test_qualifying_sessions(bank):
+    from f1env.race import QUALIFYING
+
+    cfg = de.EnvConfig(races=2, cars=4, quali_share=1.0, quali_s=300.0)
+    st, _ = jax.jit(partial(de.reset, cfg=cfg))(bank, jax.random.PRNGKey(3))
+    assert (np.asarray(st.race.session) == QUALIFYING).all() and np.isfinite(np.asarray(st.plan)).all()
+    a = jnp.zeros((800, 2, 4, 5)).at[..., 1].set(0.4)
+    st2, (_, valid, end, races, _) = run(bank, cfg, st, a)
+    valid = np.asarray(valid)
+    assert not valid[0].any()  # every car in its garage
+    out = valid.argmax(axis=0)  # leaving the garage a few seconds apart, in a random order
+    assert valid[-1].any() and len(np.unique(out[valid.any(axis=0)])) > 1
+    assert (np.asarray(st2.race.pits.stops) == 0).all() and int(np.asarray(races).sum()) == 0
+
+
+def test_mixed_sessions(bank):
+    from f1env.race import QUALIFYING
+
+    cfg = de.EnvConfig(races=200, cars=2, quali_share=0.2)
+    st, _ = jax.jit(partial(de.reset, cfg=cfg))(bank, jax.random.PRNGKey(4))
+    is_q = np.asarray(st.race.session) == QUALIFYING
+    assert 0.1 < is_q.mean() < 0.3
+    assert (np.asarray(st.race.clock)[is_q] == 0).all() and (np.asarray(st.race.clock)[~is_q] < 0).all()  # garages / lights
+    assert np.isinf(np.asarray(st.plan)[~is_q]).all() and np.isfinite(np.asarray(st.plan)[is_q]).all()

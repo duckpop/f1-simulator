@@ -22,6 +22,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 f1sim-train = "f1sim.drivers.train:main"
+f1sim-train-b = "f1sim.drivers.stage_b:main"
 f1sim-eval = "f1sim.drivers.evaluate:main"
 f1sim-check-tqc = "f1sim.pendulum:main"
 
