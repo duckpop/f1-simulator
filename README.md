@@ -17,8 +17,8 @@ and a scripted principal calls the pit stops. Phases 3 (principals) and 4 (desig
 | 4. Rewards: common and style terms, each logged | done |
 | 5. Stage A: alone, on the track-width curriculum | runs on the laptop; the real runs are for the cluster |
 | 6. Stage B: full grid, mixed profiles, frozen snapshots | runs on the laptop (smoke runs); the real runs are for the cluster |
-| 7. Eval harness | the "alone" test and mixed 22-car races per profile; full weekends in a 24-race season to do |
-| 8. Results against v2 | to do |
+| 7. Eval harness | done: alone, mixed races (stage B's pick), a 24-race season of full weekends, style metrics |
+| 8. Results against v2 | `f1sim-season` writes the report and checks the done criteria; it needs trained drivers |
 
 ## Install
 
@@ -41,6 +41,7 @@ f1sim-train --profile middle --tracks tracks --preset cluster
 f1sim-train --profile smooth --tracks tracks --preset cluster    # starts from Middle's best (and the other two)
 f1sim-eval --checkpoint runs/middle/stage-a/best.npz --tracks tracks --laps 50
 f1sim-train-b --tracks tracks --preset cluster    # stage B: all four together, each from its stage A best
+f1sim-season --tracks tracks                      # Phase 2's evaluation and the comparison with v2
 ```
 
 Without a pool, `--generate N` makes N training tracks on the spot (and the eval tracks from their seeds), for small
@@ -113,6 +114,25 @@ contact, the safety car and blue flags.
   respawn): points per race, finish rate, out on lap 1, crashes per lap, overtakes, places lost and time held under
   attack. Each profile keeps its best checkpoint (most points per race) in `runs/<profile>/stage-b/best.npz`.
 
+## Evaluation
+
+`f1sim-season` (`src/f1sim/drivers/season.py`) runs Phase 2's tests on the 10 fixed eval tracks with the default car
+(no upgrades) and each profile's best checkpoint (stage B, else stage A), driving the actors' mean actions:
+
+| Test | What's measured | v2 to beat |
+|---|---|---|
+| Alone, 50 laps per profile | finish rate, crashes per lap, lap time vs the lap simulation, laps per stint | finished 53%, crashes 1.39% per lap |
+| A 24-race season: f1env's eval calendar and round keys, full weekends (Q1, Q2, Q3 decide the grid, 305 km races, points), 5-6 cars per profile, no respawn | points per race, finish rate, out on lap 1, crashes per lap, titles | Middle 36% finished, 28% out on lap 1 |
+| Style, from the season's races | overtakes per race, attacks held (a spell with a rival within 1 s behind that ends without losing the place), km per tyre set at the profile's race speed, time in wheelspin or lock-up | |
+
+It checks Phase 2's done criteria (every profile beats v2 Middle alone; fewer cars out on lap 1 than 28%; Aggressive
+makes the most overtakes, Defensive holds the most attacks, Smooth's tyres last longest at a race speed within 2% of
+the median, Middle scores the most points or within 5% of the best) and writes `runs/results/phase2-<date>.md` and
+`.json`. f1env's `F1Env` runs the weekends (sessions, knockouts, the grid, points, standings); this code drives every
+session in jitted chunks. A full season is ~4 million steps, mostly the 305 km races; `--seasons 4` runs four in
+parallel at almost no extra cost (different weather, lights and stops). `--rounds`, `--race-km` and `--alone-laps` give
+a quicker look.
+
 ## Rewards
 
 `src/f1sim/drivers/rewards.py`. Each term is measured in its own unit and weighted by its base value
@@ -152,6 +172,8 @@ Choices made while building (open points in the spec):
 - The environment alone: ~900 steps/s at 4 races x 1 car (~1.1 ms per step, the lidar included).
 - Stage A training with the full-size brain: ~145 environment steps/s at 8 races (1,200 transitions/s, one gradient
   step per environment step). The gradient step is the cost; the cluster preset runs 64 races.
+- The season eval: ~450 steps/s with 22 cars and four drivers, about the same for 4 parallel seasons (`--seasons 4`)
+  as for one. A full season is ~4 million steps, ~2.5 hours on the laptop.
 - Stage B: ~35 environment steps/s at 4 races x 22 cars (~3,000 car-steps/s), each step followed by a gradient step for
   each of the four profiles. Compiling the four learners and the full grid takes about a minute.
 

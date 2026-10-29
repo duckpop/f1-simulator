@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from functools import lru_cache, partial
+from functools import lru_cache
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -59,9 +59,9 @@ def alone(bank, actor, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None, 
     tid = jnp.tile(jnp.arange(n), seeds)
     ecfg = eval_config(n * seeds, laps)
     k_reset, key = jax.random.split(key)
-    state, obs = jax.jit(partial(de.reset, cfg=ecfg))(bank, k_reset, tid=tid)
+    state, obs = de.compiled("reset", ecfg)(bank, k_reset, tid=tid)
     run = _runner(ecfg, cfg, chunk)
-    done_fn = jax.jit(partial(de.race_done, cfg=ecfg))
+    done_fn = de.compiled("race_done", ecfg)
     totals: dict[str, float] = {}
     steps = 0
     while steps < max_steps:
@@ -135,10 +135,10 @@ def mixed(bank, actors, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None,
     seats = mixed_seats(22, len(actors))
     ecfg = de.EnvConfig(races=r, cars=22, fixed_laps=laps, upgrades=False, random_grid=True, auto_reset=False, race=RaceConfig(respawn=False))
     k_reset, key = jax.random.split(key)
-    state, obs = jax.jit(partial(de.reset, cfg=ecfg))(bank, k_reset, tid=jnp.tile(jnp.arange(n), seeds))
+    state, obs = de.compiled("reset", ecfg)(bank, k_reset, tid=jnp.tile(jnp.arange(n), seeds))
     acc = {"amounts": jnp.zeros((r, 22, len(TERMS))), "laps": jnp.zeros((r, 22))}
     run = _mixed_runner(ecfg, cfg, chunk, tuple(int(x) for x in seats))
-    done_fn = jax.jit(partial(de.race_done, cfg=ecfg))
+    done_fn = de.compiled("race_done", ecfg)
     steps = 0
     while steps < max_steps:
         key, k = jax.random.split(key)

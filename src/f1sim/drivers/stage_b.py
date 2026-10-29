@@ -206,7 +206,7 @@ def main(argv=None):
     tracks = training_tracks(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed)
     bank, eval_bank = make_bank(tracks), make_bank(eval_tracks(a.tracks, "normal", a.eval_tracks))
     key, k_reset, k_pool = jax.random.split(key, 3)
-    env_state, obs = jax.jit(partial(de.reset, cfg=env_cfg))(bank, k_reset)
+    env_state, obs = de.compiled("reset", env_cfg)(bank, k_reset)
     league = League(env_state, obs, tuple(agents), tuple(replays), pool, jax.random.randint(k_pool, (R, n_frozen), 0, K), key, jnp.zeros((), jnp.int32))
     learn_from = max(int(sb["warmup"]) // (R * sb["per_profile"]), s0.tqc.batch // (R * sb["per_profile"]) + s0.tqc.n_step + 1)
     weights = np.stack([s.weights for s in settings])

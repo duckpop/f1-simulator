@@ -20,12 +20,14 @@ car parks in its garage: that step's car isn't `valid` any more, so the replay d
 
     state, obs = reset(bank, key, cfg)                         # obs (R, C, 209)
     state, obs, out, info = step(bank, state, action, key, cfg)  # action (R, C, 5) in [-1, 1]
+    state, obs = from_race(bank, race_state, key, cfg)     # around a session f1env's F1Env started (evals)
 
 Actions (as v2): steer; throttle and brake, each on above 0; DRS and ERS asked for above 0.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache, partial
 from typing import NamedTuple
 
 import jax
@@ -43,6 +45,7 @@ from . import principal, rewards
 
 OBS = observe.size(observe.DRIVER_LAYOUT)  # 209
 ACTIONS = 5
+SLIPPING = 0.01  # wheelspin / lock-up beyond this (how far past the grip) counts as time slipping
 LIDAR_BEAMS = observe.DRIVER_LAYOUT["lidar_edge"]
 GRID_SLOTS = 22
 PRINCIPAL_EVERY = 20  # steps: the principal decides once a second
@@ -62,6 +65,7 @@ class EnvConfig(NamedTuple):
     random_grid: bool = True  # False: car k in slot k (evals)
     auto_reset: bool = True  # False: races that are over stay over (evals)
     quali_share: float = 0.0  # sessions that are qualifying instead of a race (stage B: 0.2)
+    quali: bool = False  # sessions may be qualifying (they are with quali_share > 0, or from F1Env's weekends)
     quali_s: float = 720.0  # a short session (Q3's 12 minutes)
     quali_runs: int = 2
     release_gap: float = 4.0  # s between cars leaving the garage
@@ -86,6 +90,9 @@ class Out(NamedTuple):
     valid: jax.Array  # (R, C)
     end: jax.Array  # (R, C) int8
     lap_done: jax.Array  # (R, C) a lap completed (by a car the driver controlled)
+    attack: jax.Array  # (R, C) under attack: a rival within 1 s behind
+    lost: jax.Array  # (R, C) places lost on the track this step
+    slipping: jax.Array  # (R, C) wheelspin or a lock-up
 
 
 def to_race_actions(a) -> RaceActions:
@@ -158,14 +165,31 @@ def _inputs(bank, race, readings, prev_edge, last, flags, cfg: EnvConfig):
     return observe.driver(bank, race, readings, prev_edge, last, (flags[..., 0], flags[..., 1], flags[..., 2]), cfg.race)
 
 
+def _wrap(bank, race, limit, worn, plan, cfg: EnvConfig):
+    r, c = race.s.shape
+    z = jnp.zeros((r, c), jnp.float32)
+    last = RaceActions(z, z, z, z, z)
+    flags = jnp.zeros((r, c, 3), bool)
+    readings = observe.lidar(bank, race)
+    state = EnvState(race, readings.edge, last, flags, worn, limit, jnp.zeros(r, jnp.int32), rewards.new_memory(race.timing.place), plan)
+    return state, _inputs(bank, race, readings, readings.edge, last, flags, cfg)
+
+
 def reset(bank, key, cfg: EnvConfig, tid=None):
     race, limit, worn, plan = new_races(bank, key, cfg, tid)
-    z = jnp.zeros((cfg.races, cfg.cars), jnp.float32)
-    last = RaceActions(z, z, z, z, z)
-    flags = jnp.zeros((cfg.races, cfg.cars, 3), bool)
-    readings = observe.lidar(bank, race)
-    state = EnvState(race, readings.edge, last, flags, worn, limit, jnp.zeros(cfg.races, jnp.int32), rewards.new_memory(race.timing.place), plan)
-    return state, _inputs(bank, race, readings, readings.edge, last, flags, cfg)
+    return _wrap(bank, race, limit, worn, plan, cfg)
+
+
+def from_race(bank, race, key, cfg: EnvConfig, plan=None):
+    """(EnvState, inputs) around a session started elsewhere: f1env's F1Env runs weekends (Q1-Q3 and the grid, 305 km
+    races, points). plan: the session's qualifying plan (None in a race). The training principal and its fixed orders
+    take over; a race is cut at `time_factor` x its lap-simulation time, a qualifying session 10 minutes after its flag."""
+    r, c = race.s.shape
+    race = _strong(principal.fixed_orders(race))
+    is_q = race.session == QUALIFYING
+    limit = jnp.where(is_q, race.session_end + 600.0, cfg.time_factor * bank.lap_time[race.tid] * race.target_laps + 60.0).astype(jnp.float32)
+    plan = jnp.full((r, c, cfg.quali_runs), jnp.inf, jnp.float32) if plan is None else jnp.asarray(plan, jnp.float32)
+    return _wrap(bank, race, limit, principal.draw_worn(key, (r, c), cfg.worn), plan, cfg)
 
 
 def _restart(bank, s: EnvState, mask, key, cfg: EnvConfig) -> EnvState:
@@ -201,7 +225,7 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig):
     is_q = race.session == QUALIFYING
     call = principal.calls(bank, race, s.worn_at, cfg.race)
     race = pit_orders(race, jnp.where((decide & ~is_q)[:, None], call, -1))
-    if cfg.quali_share > 0:  # qualifying: f1env's default runs (out-lap, flying lap, in-lap, twice)
+    if cfg.quali or cfg.quali_share > 0:  # qualifying: f1env's default runs (out-lap, flying lap, in-lap, twice)
         runs = quali_orders(bank, race, s.plan, cfg.race)
         race = race._replace(pits=_select(decide & is_q, runs.pits, race.pits))
     live = ~race_done(bank, race, s.limit, cfg)  # without auto-reset (evals) a race that's over stays over
@@ -241,4 +265,13 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig):
         "races": jnp.sum(over & live),
     }
     info = {k: v.astype(jnp.float32) for k, v in info.items()}
-    return nxt, obs, Out(amounts, valid, end, valid & ev.lap_done), info
+    dyn = ev.dynamics
+    slipping = (dyn.wheelspin > SLIPPING) | (dyn.lockup_front > SLIPPING) | (dyn.lockup_rear > SLIPPING)
+    out = Out(amounts, valid, end, valid & ev.lap_done, valid & ev.records.under_attack, jnp.where(valid, ev.records.lost, 0), valid & slipping)
+    return nxt, obs, out, info
+
+
+@lru_cache(maxsize=32)
+def compiled(name: str, cfg: EnvConfig):
+    """reset / from_race / race_done for one config, jit-compiled once and reused (evals call them every session)."""
+    return jax.jit(partial({"reset": reset, "from_race": from_race, "race_done": race_done}[name], cfg=cfg))

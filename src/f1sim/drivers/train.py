@@ -121,7 +121,7 @@ def main(argv=None):
         ev_tracks = eval_tracks(a.tracks, width, a.eval_tracks)
         bank, eval_bank = make_bank(tr), make_bank(ev_tracks)
         key, k_reset = jax.random.split(key)
-        env_state, obs = jax.jit(partial(de.reset, cfg=s.env))(bank, k_reset)
+        env_state, obs = de.compiled("reset", s.env)(bank, k_reset)
         carry = loop.Carry(env_state, obs.reshape(slots, de.OBS), agent, replay, key, steps)
         chunk = loop.make_chunk(partial(stage_a_step, cfg=s.env, w=w), s.tqc, p["chunk"], p["updates"], warmup_steps, learn_from)
         print(f"width {width}: {len(tr)} training tracks, {len(ev_tracks)} eval tracks")
