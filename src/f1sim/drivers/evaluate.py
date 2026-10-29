@@ -68,7 +68,9 @@ def alone(bank, actor, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None, 
         key, k = jax.random.split(key)
         state, obs, info = run(bank, actor, state, obs, k)
         for name, v in info.items():
-            if name != "amounts":
+            if name == "amounts":
+                totals["off_track_s"] = totals.get("off_track_s", 0.0) + float(np.asarray(v)[:, TERMS.index("off_track")].sum())
+            else:
                 totals[name] = totals.get(name, 0.0) + float(np.asarray(v).sum())
         steps += chunk
         if bool(np.asarray(done_fn(bank, state.race, state.limit)).all()):
@@ -83,6 +85,7 @@ def alone(bank, actor, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None, 
         "lap_ratio": totals.get("lap_ratio", 0.0) / max(totals.get("laps_counted", 0.0), 1.0),
         "laps_per_stint": laps_done / max(n * seeds + stops, 1.0),
         "dead_tyre_s": totals.get("dead_tyre", 0.0) * 0.05,
+        "off_track_share": totals.get("off_track_s", 0.0) / max(totals.get("valid", 0.0) * 0.05, 1e-9),
         "steps": steps,
     }
 
@@ -98,7 +101,7 @@ def better(a: dict, b: dict | None) -> bool:
 
 def summary(r: dict) -> str:
     crashes = f"crashes {100 * r['crashes_per_lap']:.2f}%/lap" if r["laps"] >= 1 else f"{r['crashes_per_lap']:.0f} crashes, no lap done"
-    return f"finished {100 * r['finish_rate']:.0f}%  {crashes}  lap x{r['lap_ratio']:.3f} of the lap sim  {r['laps_per_stint']:.1f} laps/stint  ({r['laps']:.0f} laps)"
+    return f"finished {100 * r['finish_rate']:.0f}%  {crashes}  lap x{r['lap_ratio']:.3f} of the lap sim  off track {100 * r.get('off_track_share', 0.0):.1f}%  {r['laps_per_stint']:.1f} laps/stint  ({r['laps']:.0f} laps)"
 
 
 def mixed_seats(cars: int, profiles: int) -> np.ndarray:
@@ -119,7 +122,7 @@ def _mixed_runner(ecfg: de.EnvConfig, cfg: tqc.TQCConfig, steps: int, seats: tup
                 a = tqc.act(actors[p], cfg, obs[:, sl].reshape(-1, de.OBS), k, mean=True)
                 actions = actions.at[:, sl].set(a.reshape(ecfg.races, len(sl), de.ACTIONS))
             state, obs, out, _ = de.step(bank, state, actions, k, ecfg)
-            return (state, obs, {"amounts": acc["amounts"] + out.amounts, "laps": acc["laps"] + out.lap_done}), None
+            return (state, obs, {"amounts": acc["amounts"] + out.amounts, "laps": acc["laps"] + out.lap_done, "valid": acc["valid"] + out.valid}), None
 
         (state, obs, acc), _ = jax.lax.scan(body, (state, obs, acc), jax.random.split(key, steps))
         return state, obs, acc
@@ -137,7 +140,7 @@ def mixed(bank, actors, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None,
     ecfg = de.EnvConfig(races=r, cars=22, fixed_laps=laps, upgrades=False, random_grid=True, auto_reset=False, race=RaceConfig(respawn=False))
     k_reset, key = jax.random.split(key)
     state, obs = de.compiled("reset", ecfg)(bank, k_reset, tid=jnp.tile(jnp.arange(n), seeds))
-    acc = {"amounts": jnp.zeros((r, 22, len(TERMS))), "laps": jnp.zeros((r, 22))}
+    acc = {"amounts": jnp.zeros((r, 22, len(TERMS))), "laps": jnp.zeros((r, 22)), "valid": jnp.zeros((r, 22))}
     run = _mixed_runner(ecfg, cfg, chunk, tuple(int(x) for x in seats))
     done_fn = de.compiled("race_done", ecfg)
     steps = 0
@@ -166,6 +169,7 @@ def mixed(bank, actors, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None,
             "overtakes_per_race": per_car(amounts[..., t["overtake"]]),
             "places_lost_per_race": per_car(amounts[..., t["place_lost"]]),
             "held_s_per_race": per_car(amounts[..., t["holding"]]),
+            "off_track_share": float(amounts[:, sl, t["off_track"]].sum() / max(np.asarray(acc["valid"])[:, sl].sum() * 0.05, 1e-9)),
         }
     return res
 
@@ -182,7 +186,7 @@ def summary_mixed(r: dict) -> str:
     crashes = f"crashes {100 * r['crashes_per_lap']:.2f}%/lap" if r["laps"] >= 1 else f"{r['crashes_per_lap']:.0f} crashes, no lap done"
     return (
         f"{r['points_per_race']:5.2f} pts/race  finished {100 * r['finish_rate']:3.0f}%  out on lap 1 {100 * r['out_lap1']:3.0f}%  "
-        f"{crashes}  overtakes {r['overtakes_per_race']:.2f}  lost {r['places_lost_per_race']:.2f}  held {r['held_s_per_race']:.0f} s"
+        f"{crashes}  off track {100 * r.get('off_track_share', 0.0):.1f}%  overtakes {r['overtakes_per_race']:.2f}  lost {r['places_lost_per_race']:.2f}  held {r['held_s_per_race']:.0f} s"
     )
 
 

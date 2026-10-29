@@ -190,6 +190,7 @@ def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int) -> dict:
             "km_per_tyre_set": float(km / wear) if wear > 0 else float("nan"),
             "slip_s_per_race": float(slipping[:, sl].sum() * STEP_S / (cars * rounds)),
             "slip_share": float(slipping[:, sl].sum() / max(valid[:, sl].sum(), 1.0)),
+            "off_track_share": float(amounts[:, sl, t["off_track"]].sum() / max(valid[:, sl].sum() * STEP_S, 1e-9)),
             "mean_grid_slot": float(grids[..., sl].mean() + 1),
             "titles": int(sum(c == p for c in champions)),
         }
@@ -262,11 +263,11 @@ def report(alone: dict | None, sea: dict | None, sources: dict, settings: dict) 
             lines.append(f"| {p} | {r['points_per_race']:.2f} | {_pct(r['finish_rate'])} | {_pct(r['out_lap1'])} | {_pct(r['crashes_per_lap'], r['laps'], 2)} | {_pct(r['disqualified'])} | {r['mean_grid_slot']:.1f} | {r['titles']} |")
         for p, v in V2["season"].items():
             lines.append(f"| v2 {p} | | {100 * v['finish_rate']:.0f}% | {100 * v['out_lap1']:.0f}% | | | | |")
-        lines += ["", "## Style", "", "| Profile | Overtakes per race | Places lost per race | Attacks per race | Attacks held | km per tyre set | Race speed | Wheelspin / lock-up per race |", "|---|---|---|---|---|---|---|---|"]
+        lines += ["", "## Style", "", "| Profile | Overtakes per race | Places lost per race | Attacks per race | Attacks held | km per tyre set | Race speed | Wheelspin / lock-up per race | Off the track |", "|---|---|---|---|---|---|---|---|---|"]
         for p, r in sea["profiles"].items():
             lines.append(
                 f"| {p} | {r['overtakes_per_race']:.2f} | {r['places_lost_per_race']:.2f} | {r['attacks_per_race']:.1f} | {_pct(r['attacks_held'])} | "
-                f"{_num(r['km_per_tyre_set'])} | {_num(r['race_speed_kmh'], unit=' km/h')} | {r['slip_s_per_race']:.1f} s ({_pct(r['slip_share'], digits=1)}) |"
+                f"{_num(r['km_per_tyre_set'])} | {_num(r['race_speed_kmh'], unit=' km/h')} | {r['slip_s_per_race']:.1f} s ({_pct(r['slip_share'], digits=1)}) | {_pct(r.get('off_track_share', float('nan')), digits=1)} |"
             )
     lines += ["", "v2 was measured on real tracks; v3 uses generated tracks with run-offs and pits, so the v2 numbers are the bar but the conditions differ."]
     return "\n".join(lines) + "\n"

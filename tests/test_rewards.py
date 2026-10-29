@@ -8,13 +8,14 @@ from f1sim.drivers import rewards as rw
 TERM = {t: i for i, t in enumerate(rw.TERMS)}
 
 
-def events(gained=0, lost=0, place=5):
+def events(gained=0, lost=0, place=5, progress=0.0, off=False):
     z = jnp.zeros((1, 1))
     i = lambda x: jnp.full((1, 1), x, jnp.int32)
     rec = SimpleNamespace(gained=i(gained), lost=i(lost), place=i(place), under_attack=z > 0, inside_line=z > 0)
     dyn = SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z)
     return SimpleNamespace(
-        records=rec, dynamics=dyn, progress=z, crashed=z > 0, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, respawned=z > 0
+        records=rec, dynamics=dyn, progress=z + progress, crashed=z > 0, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, respawned=z > 0,
+        off_track=jnp.full((1, 1), off),
     )
 
 
@@ -53,3 +54,15 @@ def test_profile_weights_scale_style_terms_only():
     assert w["inputs"] == 0.5 * rw.BASE["inputs"] and w["slip"] == 0.5 * rw.BASE["slip"]
     assert w["progress"] == rw.BASE["progress"] and w["crash"] == -70.0
     assert np.isclose(rw.BASE["progress"] * 86.1 * 0.05, 1.0)  # a step at top speed is worth +1
+
+
+def test_no_progress_off_the_track():
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    mem = rw.new_memory(jnp.full((1, 1), 5))
+    on, _ = rw.amounts(events(progress=4.0), a, a, mem, jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool))
+    off, _ = rw.amounts(events(progress=4.0, off=True), a, a, mem, jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool))
+    assert float(on[0, 0, TERM["progress"]]) == 4.0 and float(on[0, 0, TERM["off_track"]]) == 0.0
+    assert float(off[0, 0, TERM["progress"]]) == 0.0 and np.isclose(float(off[0, 0, TERM["off_track"]]), 0.05)
+    w = dict(zip(rw.TERMS, rw.weights()))
+    assert w["off_track"] == -2.0  # common to every profile
+    assert all(dict(zip(rw.TERMS, rw.weights(None, {s: 2.0 for s in rw.STYLES})))["off_track"] == -2.0 for _ in [0])

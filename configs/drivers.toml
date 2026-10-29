@@ -17,13 +17,14 @@ conv = [[32, 5, 2], [64, 3, 2]]    # lidar: (filters, width, stride) along the 5
 other_hidden = [128]               # the other ~59 inputs
 
 [rewards]                   # base values per unit (f1sim.drivers.rewards); profiles multiply the style terms
-progress = 0.23229          # per metre: +1 for a step at top speed (86.1 m/s x 0.05 s), as v2
+progress = 0.23229          # per metre on the track: +1 for a step at top speed (86.1 m/s x 0.05 s), as v2
 crash = -70.0
 warning = -50.0
 bump = -2.0
 pit = 5.0                   # entering the pit lane on a call
 dead_tyre = -2.0            # per second on a dead tyre
 finish = 50.0
+off_track = -2.0            # per second with the car's centre off the track (its progress doesn't count either)
 overtake = 20.0             # per place, held 2 s
 place_lost = -20.0          # per place
 holding = 1.0               # per second, under attack

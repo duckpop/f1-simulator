@@ -6,13 +6,14 @@ The amounts are kept per term so each one's share of a profile's reward can be l
 
 | Term | Amount per step | Base | Style |
 |---|---|---|---|
-| progress | metres along the centreline | +1 for a step at top speed (as v2) | common |
+| progress | metres along the centreline, while the car's centre is on the track | +1 for a step at top speed (as v2) | common |
 | crash | crashes (ends the episode) | -70 | common |
 | warning | warnings (the 4th is a black flag, which ends it) | -50 | common |
 | bump | contacts under 20 km/h | -2 | common |
 | pit | entering the pit lane on a call | +5 | common |
 | dead_tyre | seconds on a tyre at 0% life | -2 | common |
 | finish | finishing the race | +50 | common |
+| off_track | seconds with the car's centre off the track (run-off, gravel) | -2 | common |
 | overtake | places gained on the track and held for 2 s | +20 | overtake |
 | place_lost | places lost on the track | -20 | place_lost |
 | holding | seconds keeping the place with a rival within 1 s behind | +1 | holding |
@@ -24,6 +25,11 @@ The amounts are kept per term so each one's share of a profile's reward can be l
 An overtake pays only for places better than the best one already paid this episode, so two cars can't farm points
 by swapping places (for Aggressive an overtake is worth 4x a place lost). The f1env autopilot takes every car with a
 committed call into the pit lane, so a called stop can't be missed: only the "+" side of the pit term exists.
+
+f1env has no track limits (run-off only has less grip), and progress is measured along the centreline, so a driver can
+gain by cutting a corner across the run-off; Middle learned to cut the inside of esses. So progress made with the car's
+centre off the track doesn't count (cutting 60 m at speed forfeits ~14, worth far more than the time it saves), and
+every second off the track costs a little more.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
-TERMS = ("progress", "crash", "warning", "bump", "pit", "dead_tyre", "finish", "overtake", "place_lost", "holding", "inside_line", "tyre_wear", "inputs", "slip")
+TERMS = ("progress", "crash", "warning", "bump", "pit", "dead_tyre", "finish", "off_track", "overtake", "place_lost", "holding", "inside_line", "tyre_wear", "inputs", "slip")
 STYLE = {"overtake": "overtake", "place_lost": "place_lost", "holding": "holding", "inside_line": "inside_line", "tyre_wear": "tyre_wear", "inputs": "smoothness", "slip": "smoothness"}
 STYLES = ("overtake", "place_lost", "holding", "inside_line", "tyre_wear", "smoothness")
 
@@ -45,6 +51,7 @@ BASE = {
     "pit": 5.0,
     "dead_tyre": -2.0,
     "finish": 50.0,
+    "off_track": -2.0,
     "overtake": 20.0,
     "place_lost": -20.0,
     "holding": 1.0,
@@ -103,12 +110,13 @@ def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: fl
     inputs = jnp.abs(actions.steer - last_actions.steer) + jnp.abs(actions.throttle - last_actions.throttle) + jnp.abs(actions.brake - last_actions.brake)
     slip = dyn.wheelspin + dyn.lockup_front + dyn.lockup_rear
     parts = {
-        "progress": events.progress,
+        "progress": jnp.where(events.off_track, 0.0, events.progress),  # no progress off the track: cutting doesn't pay
         "crash": events.crashed,
         "warning": _bits(events.warned),
         "bump": events.bump,
         "pit": events.pit_in,
         "dead_tyre": events.tyre_dead * dt,
+        "off_track": events.off_track * dt,
         "finish": events.finished,
         "overtake": paid,
         "place_lost": lost,

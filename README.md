@@ -177,13 +177,14 @@ separately (`runs/<profile>/stage-a/log.jsonl`).
 
 | Term | Base | Middle | Aggressive | Smooth | Defensive |
 |---|---|---|---|---|---|
-| Progress | +1 per step at top speed (as v2) | | | | |
+| Progress, on the track | +1 per step at top speed (as v2) | | | | |
 | Crash (ends the episode) | -70 | | | | |
 | Warning (the 4th is a black flag) | -50 | | | | |
 | Bump (under 20 km/h) | -2 | | | | |
 | Pit lane entered on a call | +5 | | | | |
 | Dead tyre | -2 per s | | | | |
 | Finish | +50 | | | | |
+| Off the track (the car's centre); its progress doesn't count either | -2 per s | | | | |
 | Overtake (held 2 s) | +20 | 1x | 2x | 0.5x | 0.5x |
 | Place lost | -20 | 1x | 0.5x | 1x | 2x |
 | Holding under attack | +1 per s | 1x | 0.5x | 0.5x | 2x |
@@ -198,6 +199,9 @@ Choices made while building (open points in the spec):
 - **No farming by swapping places:** with Aggressive's weights an overtake is worth 4x a place lost, so two cars could
   gain by passing each other back and forth. An overtake pays only for a place better than the best one already paid
   this episode.
+- **No corner cutting:** f1env has no track limits (run-off only has less grip) and progress is measured along the
+  centreline, so Middle learned to cut the inside of esses across the run-off. Progress made with the car's centre off
+  the track doesn't count, and each second off costs 2 more; evals and the season report show the share of time off.
 - **The pit term has only its "+" side:** f1env's autopilot takes every car with a committed call into the pit lane, so
   a driver can't miss a called stop (other than by crashing first).
 - **The base values are first proposals**, set against v2's progress scale as the spec asks; they're one table in the

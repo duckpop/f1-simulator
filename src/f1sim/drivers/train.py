@@ -62,6 +62,7 @@ def chunk_record(info, m, w, elapsed: float, steps: int, slots: int) -> dict:
         "finishes": tot["finishes"],
         "lap_ratio": tot["lap_ratio"] / max(tot["laps_counted"], 1.0),
         "pit_stops": tot["pit_stops"],
+        "off_track_share": float(amounts[rewards.TERMS.index("off_track")] / max(tot["valid"] * 0.05, 1e-9)),
     }
     if learning.any():
         rec.update({k: float(np.asarray(m[k])[learning].mean()) for k in tqc.METRICS})
@@ -156,7 +157,7 @@ def main(argv=None):
             alpha = f"  alpha {rec['alpha']:.3f}  q {rec['q']:7.1f}  H {rec['entropy']:5.2f}" if "alpha" in rec else "  (warming up)"
             print(
                 f"[{width:>6}] {n:>9,} steps  {rec['env_steps_per_s']:6.0f}/s  reward/step {rec['reward_per_step']:6.3f}  "
-                f"crashes {rec['crashes']:3.0f}  laps {rec['laps']:4.0f}  races {rec['races']:3.0f}{alpha}",
+                f"crashes {rec['crashes']:3.0f}  laps {rec['laps']:4.0f}  off track {100 * rec['off_track_share']:4.1f}%  races {rec['races']:3.0f}{alpha}",
                 flush=True,
             )
             if next_rotate and n >= next_rotate:  # a fresh set of training tracks
