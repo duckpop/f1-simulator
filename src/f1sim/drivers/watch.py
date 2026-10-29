@@ -41,6 +41,8 @@ from .config import PROFILES, load
 from .tracks import eval_track, widened
 
 STEP_S = 0.05
+FRAME_MS = 30  # the live window aims at ~30 frames a second
+FRAME_STEPS = 160  # at most this many race steps per frame (8 s of racing): beyond that the window drops the backlog
 COMPOUNDS = ("softs", "mediums", "hards", "wets")
 KEYS = "space: pause  f: follow / whole track  n p: next / previous car  + -: zoom  up down: speed"
 
@@ -152,10 +154,19 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
 
     race = Race(track, actor, cfg, cars, laps, respawn, seed)
     rec = Recorder(track, race=0, title=title or track.name) if save else None
+    # compile every block size now, not while the window is up (a compile freezes it for seconds); the start lights are
+    # on for at least 5 s, so these first steps change nothing
+    t0 = time.perf_counter()
+    print("compiling the race step...", end=" ", flush=True)
+    for b in (16, 4, 1):
+        race.steps(b, rec)
+    race.over
+    print(f"{time.perf_counter() - t0:.0f} s", flush=True)
 
     for k in [k for k in plt.rcParams if k.startswith("keymap.") and k != "keymap.quit"]:
         plt.rcParams[k] = []  # matplotlib's own keys (f fullscreen, p pan, arrows: view history) would clash with ours
     plt.rcParams["toolbar"] = "None"
+    plt.rcParams["figure.raise_window"] = False
     fig, ax = plt.subplots(figsize=(13, 8.5))
     fig.canvas.manager.set_window_title(title or track.name)
     render_track(track, ax, labels=True, title=False)
@@ -206,8 +217,6 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
             view["speed"] = max(view["speed"] / 2, 0.125)
 
     fig.canvas.mpl_connect("key_press_event", on_key)
-    fig.canvas.mpl_connect("close_event", lambda e: view.update(closed=True))
-    plt.show(block=False)
 
     def draw(race, ended: bool):
         c = race.cars
@@ -252,29 +261,38 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
             view["text"] = text
             panel.setText(text)
 
-    owed, last, ended, cap = 0.0, time.perf_counter(), False, 160
-    while not view["closed"]:
+    loop = {"owed": 0.0, "last": time.perf_counter(), "ended": False}
+
+    def tick():
+        """One frame: the race steps on by the time since the last frame (x speed), then the view redraws."""
         now = time.perf_counter()
-        if not view["paused"] and not ended:
-            owed += (now - last) * view["speed"]
+        if not view["paused"] and not loop["ended"]:
+            loop["owed"] += (now - loop["last"]) * view["speed"]
             n = 0
-            while owed >= STEP_S and n < cap:
-                left = int(owed / STEP_S)  # compiled blocks of 16 and 4 when behind: one step at a time is slow
-                b = next(b for b in (16, 4, 1) if b <= left and n + b <= cap) if left else 1
+            while loop["owed"] >= STEP_S and n < FRAME_STEPS:
+                left = int(loop["owed"] / STEP_S)  # compiled blocks of 16 and 4 when behind: one step at a time is slow
+                b = next(b for b in (16, 4, 1) if b <= left and n + b <= FRAME_STEPS) if left else 1
                 race.steps(b, rec)
-                owed -= b * STEP_S
+                loop["owed"] -= b * STEP_S
                 n += b
             if n and (race.over or (seconds and race.clock >= seconds)):
-                ended = True
-            if n >= cap:
-                owed = 0.0  # can't keep up at this speed: drop the backlog rather than stutter
-        last = now
-        draw(jax.device_get(race.state.race), ended)
+                loop["ended"] = True
+            if n >= FRAME_STEPS:
+                loop["owed"] = 0.0  # can't keep up at this speed: drop the backlog rather than stutter
+        loop["last"] = now
+        draw(jax.device_get(race.state.race), loop["ended"])
         fig.canvas.draw_idle()
-        plt.pause(0.001 if not (ended or view["paused"]) else 0.05)
-        if ended and close_when_done:
-            break
-    plt.close(fig)
+        if loop["ended"] and close_when_done:
+            timer.stop()
+            plt.close(fig)
+
+    # Qt's own event loop runs the window (plt.show blocks until it's closed); a timer drives the frames
+    timer = fig.canvas.new_timer(interval=FRAME_MS)
+    timer.add_callback(tick)
+    fig.canvas.mpl_connect("close_event", lambda e: timer.stop())
+    timer.start()
+    plt.show()
+    timer.stop()
     return rec, jax.device_get(race.state.race)
 
 
