@@ -42,6 +42,7 @@ f1sim-train --profile middle --tracks tracks --preset cluster
 f1sim-train --profile smooth --tracks tracks --preset cluster    # starts from Middle's best (and the other two)
 f1sim-eval --checkpoint runs/middle/stage-a/best.npz --tracks tracks --laps 50
 f1sim-train-b --tracks tracks --preset cluster    # stage B: all four together, each from its stage A best
+f1sim-train-b --tracks tracks --preset cluster --resume   # after a stop: each profile from its stage B latest.npz
 f1sim-season --tracks tracks                      # Phase 2's evaluation and the comparison with v2
 ```
 

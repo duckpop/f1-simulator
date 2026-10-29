@@ -26,6 +26,16 @@ def meta(path) -> dict:
         return json.loads(str(d["meta"]))
 
 
+def best_bar(path, **same) -> dict | None:
+    """The eval result an existing best checkpoint was saved for, as the bar a new run has to beat, if its eval was the
+    same kind (every key in `same` matches its record); otherwise None (a new run's first eval sets the bar)."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    info = meta(path)
+    return info.get("eval") if all(info.get(k) == v for k, v in same.items()) else None
+
+
 def load(path, template):
     """(agent shaped like `template`, on the device; meta)."""
     with np.load(path, allow_pickle=False) as d:

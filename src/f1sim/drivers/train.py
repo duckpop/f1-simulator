@@ -116,13 +116,16 @@ def main(argv=None):
     warmup_steps = warmup // slots  # random actions
     learn_from = max(int(sa["warmup"]) // slots, s.tqc.batch // slots + s.tqc.n_step + 1)  # a started profile drives its own policy meanwhile
     w = jnp.asarray(s.weights)
-    meta = {"profile": s.profile, "preset": a.preset, "stage": "A", "styles": s.styles, "drop": s.tqc.drop, "gamma": s.tqc.gamma, "target_entropy": s.tqc.target_entropy, "init": init}
+    meta = {"profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "styles": s.styles, "drop": s.tqc.drop, "gamma": s.tqc.gamma, "target_entropy": s.tqc.target_entropy, "init": init}
     print(f"{s.profile}: d={s.tqc.drop} ({s.tqc.drop * s.tqc.critics} of {s.tqc.critics * s.tqc.quantiles} atoms dropped)  H0={s.tqc.target_entropy}  gamma={s.tqc.gamma}  {p['races']} races x 1 car  replay {p['replay']:,}")
 
     steps = jnp.zeros((), jnp.int32)
     widths = a.widths.split(",") if a.widths else sa["widths"]
     normal_eval = eval_tracks(a.tracks, "normal", a.eval_tracks)
-    best_overall = None
+    # an earlier run's best (same eval) stays the bar, so a new run's first eval can't overwrite a better checkpoint
+    best_overall = checkpoint.best_bar(out / "best.npz", stage="A", eval_kind="alone", eval_laps=p["eval_laps"])
+    if best_overall:
+        print(f"best so far on the normal tracks: {evaluate.summary(best_overall)}")
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
     for i_width, width in enumerate(widths):
         rot = Rotation(a.tracks, width, a.generate or p["tracks"], seed=a.seed + i_width, generate=bool(a.generate))

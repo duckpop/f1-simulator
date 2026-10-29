@@ -170,6 +170,7 @@ def main(argv=None):
     ap.add_argument("--generate", type=int, default=0, help="no pool: generate this many training tracks")
     ap.add_argument("--eval-tracks", type=int, default=10)
     ap.add_argument("--init-all", help="start every profile from this checkpoint (default: each one's stage A best)")
+    ap.add_argument("--resume", action="store_true", help="continue every profile from its own stage B latest.npz (after a stop)")
     ap.add_argument("--steps", type=int, help="override steps_b (environment steps)")
     ap.add_argument("--eval-every", type=int, help="override eval_every_b (environment steps)")
     ap.add_argument("--snapshot-every", type=int, help="override snapshot_every (environment steps)")
@@ -195,7 +196,7 @@ def main(argv=None):
     agents, replays = [], []
     for s in settings:
         template = tqc.init(jax.random.PRNGKey(0), s.tqc)
-        init = a.init_all or str(Path(a.out) / s.profile / "stage-a" / "best.npz")
+        init = str(Path(a.out) / s.profile / "stage-b" / "latest.npz") if a.resume else a.init_all or str(Path(a.out) / s.profile / "stage-a" / "best.npz")
         base, info = checkpoint.load(init, template)
         agents.append(tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha))
         slots = R * int((seats == PROFILES.index(s.profile)).sum())
@@ -226,7 +227,12 @@ def main(argv=None):
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
     next_rotate = rotate_every if rot.rotates and rotate_every else None
     print(f"training tracks: {rot.describe()}")
-    best: dict[str, dict | None] = {s.profile: None for s in settings}
+    # an earlier run's best (same eval) stays the bar, so a new run's first eval can't overwrite a better checkpoint
+    eval_meta = {"stage": "B", "eval_kind": "weekend", "eval_laps": p["eval_laps"]}
+    best: dict[str, dict | None] = {s.profile: checkpoint.best_bar(outs[s.profile] / "best.npz", **eval_meta) for s in settings}
+    for name, bar in best.items():
+        if bar:
+            print(f"{name:>10}: best so far {evaluate.summary_mixed(bar)}")
     t_start = time.time()
     while int(league.steps) < budget:
         t0 = time.time()
@@ -258,7 +264,7 @@ def main(argv=None):
             log_file.flush()
             for s, ag in zip(settings, league.agents):
                 r = res["profiles"][s.profile]
-                meta = {"profile": s.profile, "preset": a.preset, "stage": "B", "env_steps": n, "eval": r}
+                meta = {"profile": s.profile, "preset": a.preset, **eval_meta, "env_steps": n, "eval": r}
                 checkpoint.save(outs[s.profile] / "latest.npz", ag, meta)
                 improved = evaluate.better_mixed(r, best[s.profile])
                 if improved:
