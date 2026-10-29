@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = ["jax[cuda12]>=0.4.35"]
+live = ["matplotlib>=3.8", "PyQt6>=6.6"]  # f1sim-watch's live window
 dev = ["pytest>=8"]
 
 [project.scripts]

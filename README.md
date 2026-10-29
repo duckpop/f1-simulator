@@ -28,7 +28,7 @@ lives in the keyring, the install waits for the keyring's unlock prompt.
 
 ```bash
 uv venv
-uv pip install -e ".[cuda,dev]"          # leave out cuda for CPU only
+uv pip install -e ".[cuda,dev,live]"     # leave out cuda for CPU only; live: f1sim-watch's window
 ```
 
 Working on f1env at the same time? Install your local copy over the pinned one: `uv pip install -e ../f1env`.
@@ -126,18 +126,27 @@ contact, the safety car and blue flags.
 ## Watching a driver
 
 ```bash
-f1sim-watch --tracks tracks                          # Middle's current best, alone, on eval track 0, 5 laps
-f1sim-watch --tracks tracks --track 3 --seconds 120  # another eval track, the first two minutes
-f1sim-watch --tracks tracks --cars 22 --laps 10      # the same driver in all 22 cars
+f1sim-watch --tracks tracks                          # Middle's current best, alone, on eval track 0, live
+f1sim-watch --tracks tracks --cars 22 --track 3      # the same driver in all 22 cars
+f1sim-watch --tracks tracks --save                   # also save the race as runs/watch/<profile>-<track>-<width>.html
+f1sim-watch --tracks tracks --no-window              # no window (on the cluster): only the HTML replay
 f1sim-watch --profile smooth --tracks tracks         # any profile; or --checkpoint <file>
 ```
 
-It records one race with f1env's viewer and writes `runs/watch/<profile>-<track>-<width>.html`: one page to open in any
-browser (play, pause, scrub, zoom, follow a car, the timing tower and race log). The default driver is the profile's
-newest best checkpoint (stage B's, else stage A's best, else the newest `best-<width>.npz` while the curriculum is
-still on the wide tracks), at the width it was saved at; at 26 m only eval tracks 3 and 7 have a wide copy, other
-tracks fall back to the normal width. It uses the mean action, the default car and the training principal; add
-`--respawn` to let crashed cars rejoin as in training.
+A window shows the race as it runs, in real time: f1env's track drawing with the cars on it, following one car, and a
+side panel with that car's place, lap, speed, tyres, ERS and DRS, and the timing tower. Keys: space pauses, f switches
+between following a car and the whole track, n / p pick the next / previous car, + / - zoom, up / down change the speed
+(`--speed` to start at another). `--save` also records the race and writes f1env's HTML replay page when the window is
+closed (play, scrub, zoom, follow any car, the race log); `--no-window` only writes that.
+
+The window needs the `live` extra (matplotlib and PyQt6: `uv pip install -e ".[live]"`). It runs on the CPU by
+default (`--device gpu` to change), where one race is quick (about 1 ms a step alone, 4 ms with 22 cars), so it neither
+slows down nor queues behind a training run on the GPU: ~30 frames/s with 22 cars on the laptop.
+
+The default driver is the profile's newest best checkpoint (stage B's, else stage A's best, else the newest
+`best-<width>.npz` while the curriculum is still on the wide tracks), at the width it was saved at; at 26 m only eval
+tracks 3 and 7 have a wide copy, other tracks fall back to the normal width. It uses the mean action, the default car and
+the training principal; add `--respawn` to let crashed cars rejoin as in training.
 
 ## Evaluation
 
