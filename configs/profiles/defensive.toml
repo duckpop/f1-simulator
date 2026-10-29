@@ -1,0 +1,13 @@
+description = "Keeping position: inside line first, blocks space, tighter lines when a rival is within DRS distance (1 s)."
+drop = 2                    # 10 of 125
+target_entropy = -2.0
+gamma = 0.990               # ~100 steps, 5 s
+start_from = "middle"
+
+[weights]
+overtake = 0.5
+place_lost = 2.0
+holding = 2.0
+inside_line = 1.0
+tyre_wear = 1.0
+smoothness = 1.0

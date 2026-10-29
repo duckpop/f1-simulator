@@ -1,0 +1,13 @@
+description = "The best blend of pace, consistency, tyre care and controlled overtaking. Trained first, from scratch; the other three start from it."
+drop = 2                    # d per critic: 10 of 125 atoms dropped
+target_entropy = -2.0       # H0
+gamma = 0.995               # ~200 steps, 10 s
+start_from = ""
+
+[weights]                   # x each style term's base value
+overtake = 1.0
+place_lost = 1.0
+holding = 1.0
+inside_line = 0.0
+tyre_wear = 1.0
+smoothness = 1.0

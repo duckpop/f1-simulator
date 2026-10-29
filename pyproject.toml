@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "f1sim"
+version = "0.1.0"
+description = "F1 Racer v3 training: the agents that race in f1env. Phase 2: TQC drivers in four profiles."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # the environment, pinned: a change to f1env changes what the drivers learn on
+    "f1env @ git+ssh://git@github.com/duckpop/f1env.git@69cbf5256d099cd4e05cf97a43fc6590ebdf5d35",
+    "jax>=0.4.35",
+    "optax>=0.2.3",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+cuda = ["jax[cuda12]>=0.4.35"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+f1sim-train = "f1sim.drivers.train:main"
+f1sim-eval = "f1sim.drivers.evaluate:main"
+f1sim-check-tqc = "f1sim.pendulum:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/f1sim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: learning checks that take minutes (run with: pytest -m slow)"]
+addopts = "-m 'not slow'"

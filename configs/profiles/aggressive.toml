@@ -1,0 +1,13 @@
+description = "Overtaking: late braking, high lateral g, takes the gaps it's offered, willing to use high-risk lines."
+drop = 1                    # 5 of 125: the most optimistic critic
+target_entropy = -1.5
+gamma = 0.985               # ~67 steps, 3.3 s
+start_from = "middle"
+
+[weights]
+overtake = 2.0
+place_lost = 0.5
+holding = 0.5
+inside_line = 0.0
+tyre_wear = 0.5
+smoothness = 0.5

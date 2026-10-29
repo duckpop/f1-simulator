@@ -1,0 +1,68 @@
+# Phase 2: the drivers. Settings every profile shares; each profile's own are in profiles/<name>.toml, and the
+# machine's (batch of races, replay size, how often to eval) in [preset.<name>].
+
+[tqc]                       # the brain (f1sim.tqc.TQCConfig); d, H0 and gamma are per profile
+critics = 5                 # N
+quantiles = 25              # M: 125 atoms
+lr = 3e-4                   # actor, critics and alpha
+batch = 256
+tau = 0.005
+n_step = 5
+actor_hidden = [256, 256]
+critic_hidden = [512, 512, 512]
+init_alpha = 1.0
+
+[encoder]                   # every network's input branches (f1sim.nets.EncoderSpec)
+conv = [[32, 5, 2], [64, 3, 2]]    # lidar: (filters, width, stride) along the 50 beams, 3 channels
+other_hidden = [128]               # the other ~59 inputs
+
+[rewards]                   # base values per unit (f1sim.drivers.rewards); profiles multiply the style terms
+progress = 0.23229          # per metre: +1 for a step at top speed (86.1 m/s x 0.05 s), as v2
+crash = -70.0
+warning = -50.0
+bump = -2.0
+pit = 5.0                   # entering the pit lane on a call
+dead_tyre = -2.0            # per second on a dead tyre
+finish = 50.0
+overtake = 20.0             # per place, held 2 s
+place_lost = -20.0          # per place
+holding = 1.0               # per second, under attack
+inside_line = 2.0           # per second
+tyre_wear = -10.0           # per % of tyre life
+inputs = -0.05              # per unit of steer + throttle + brake change in a step
+slip = -0.2                 # per unit of wheelspin + lock-up in a step
+
+[env]                       # the races (f1sim.drivers.env.EnvConfig)
+min_laps = 5
+race_km = 305.0
+pit_share = 0.5             # at least half the races need a pit stop
+pit_km = 90.0
+time_factor = 2.5           # a race is cut at this x its lap-simulation time (bootstrapped)
+worn = [0.08, 0.12]         # the principal boxes each stint at this tyre life
+
+[stage_a]                   # alone, one car per race, on the track-width curriculum
+widths = ["26", "20", "normal"]    # m; "normal" is the 12-15 m tracks
+patience = 3                # evals without a better eval before moving on to the next width
+warmup = 10_000             # transitions before the first update: random actions, or the policy when starting from another profile
+
+[preset.laptop]             # RTX 3050 Ti, 4 GB: debugging and small runs
+races = 8
+replay = 200_000            # transitions
+tracks = 16                 # training tracks on the GPU at once (~14 MB each)
+chunk = 500                 # environment steps per jitted call
+updates = 1                 # gradient steps per environment step
+eval_every = 25_000         # environment steps
+eval_laps = 5
+eval_seeds = 1
+steps_per_width = 400_000   # at most, environment steps
+
+[preset.cluster]            # the real runs
+races = 64
+replay = 1_000_000
+tracks = 200
+chunk = 1000
+updates = 1
+eval_every = 50_000
+eval_laps = 50
+eval_seeds = 2
+steps_per_width = 5_000_000

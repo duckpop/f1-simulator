@@ -1,0 +1,13 @@
+description = "Tyre saving: little wheelspin, smooth trail-braking, low tyre slip, steady long-run pace."
+drop = 3                    # 15 of 125 (d = 4 to compare)
+target_entropy = -2.5
+gamma = 0.997               # ~333 steps, 17 s
+start_from = "middle"
+
+[weights]
+overtake = 0.5
+place_lost = 1.0
+holding = 0.5
+inside_line = 0.0
+tyre_wear = 2.0
+smoothness = 2.0
