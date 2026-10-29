@@ -23,7 +23,8 @@ and a scripted principal calls the pit stops. Phases 3 (principals) and 4 (desig
 ## Install
 
 Needs Python 3.11+ and [uv](https://docs.astral.sh/uv/). f1env is pinned to a commit (`pyproject.toml`); it's a
-private repo, so installing it takes your GitHub SSH key.
+private repo, so installing it takes a GitHub SSH key with access to it (on the cluster too). On a desktop whose key
+lives in the keyring, the install waits for the keyring's unlock prompt.
 
 ```bash
 uv venv
@@ -96,7 +97,9 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
 
 **Stage A** (`train.py`): one car per race, on wide copies of the tracks first (~26 m, then ~20 m), then the 12-15 m
 tracks, moving on when the eval at that width stops improving. Middle trains first, from scratch; the other three start
-from its best stage A networks with their own settings and rewards.
+from its best stage A networks with their own settings and rewards. The eval at a wide width runs on the eval tracks'
+wide copies that fit (at 26 m only 2 of the 10 do, at 20 m 5), each run more times so every width's eval has as many
+races; if none fit, it runs on the normal ones.
 
 **Stage B** (`stage_b.py`): 22 cars per race on the 12-15 m tracks, with overtaking, dirty air, slipstream, DRS,
 contact, the safety car and blue flags.

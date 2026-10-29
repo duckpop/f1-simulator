@@ -45,11 +45,16 @@ def training_tracks(pool, width="normal", n: int = 16, seed: int = 0, log=print)
 
 def eval_tracks(pool, width="normal", n: int = EVAL_TRACKS):
     """The fixed eval tracks (the first n), widened when asked."""
-    w = _width(width)
     if pool is None:
         tracks = [generatemap(seed=EVAL_SEED0 + k) for k in range(n)]
     else:
         tracks = [load_track(Path(pool) / e["file"]) for e in load_pool(pool)["eval"][:n]]
-    if w is not None:
-        tracks = [c for c in (widen(t, w) for t in tracks) if c is not None]
-    return tracks
+    return widened(tracks, width)
+
+
+def widened(tracks, width):
+    """Copies at a wider width, leaving out those that don't fit (at 26 m only ~2 of the 10 eval tracks do)."""
+    w = _width(width)
+    if w is None:
+        return list(tracks)
+    return [c for c in (widen(t, w) for t in tracks) if c is not None]

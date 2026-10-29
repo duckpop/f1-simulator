@@ -33,9 +33,8 @@ def test_quantile_loss_is_zero_on_target_and_pulls_towards_it():
 
 def test_quantiles_spread_to_the_target_distribution():
     target = jnp.linspace(-1.0, 1.0, 101)[None]  # one sample, a uniform spread of atoms
-    z = jnp.zeros((1, 1, 4))
-    for _ in range(3000):
-        z = z - 2.0 * jax.grad(lambda z: tqc.quantile_huber(z, target, kappa=0.01))(z)
+    grad = jax.grad(lambda z: tqc.quantile_huber(z, target, kappa=0.01))
+    z = jax.jit(lambda z: jax.lax.fori_loop(0, 3000, lambda _, z: z - 2.0 * grad(z), z))(jnp.zeros((1, 1, 4)))
     np.testing.assert_allclose(np.asarray(z[0, 0]), [-0.75, -0.25, 0.25, 0.75], atol=0.05)  # the 1/8, 3/8 ... quantiles
 
 

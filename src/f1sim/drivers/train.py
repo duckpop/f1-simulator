@@ -35,7 +35,7 @@ from .. import replay as rp
 from . import env as de
 from . import evaluate, rewards
 from .config import load
-from .tracks import eval_tracks, training_tracks
+from .tracks import eval_tracks, training_tracks, widened
 
 
 def stage_a_step(bank, state, action, key, cfg: de.EnvConfig, w):
@@ -78,6 +78,7 @@ def main(argv=None):
     ap.add_argument("--init", help="start from this checkpoint (default: the start_from profile's best stage A)")
     ap.add_argument("--widths", help='override the curriculum, e.g. "normal" or "26,normal"')
     ap.add_argument("--steps", type=int, help="override steps_per_width (environment steps)")
+    ap.add_argument("--eval-every", type=int, help="override eval_every (environment steps)")
     ap.add_argument("--out", default="runs")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -115,20 +116,28 @@ def main(argv=None):
 
     steps = jnp.zeros((), jnp.int32)
     widths = a.widths.split(",") if a.widths else sa["widths"]
+    normal_eval = eval_tracks(a.tracks, "normal", a.eval_tracks)
     best_overall = None
     for width in widths:
         tr = training_tracks(a.tracks, width, a.generate or p["tracks"], seed=a.seed)
-        ev_tracks = eval_tracks(a.tracks, width, a.eval_tracks)
+        # the eval at a wide width: the eval tracks' copies that fit, each run more times so every width's eval has as
+        # many races; if none fit, the normal eval tracks
+        ev_tracks = widened(normal_eval, width)
+        if not ev_tracks:
+            print(f"width {width}: no eval track fits at this width; evaluating on the normal ones")
+            ev_tracks = normal_eval
+        eval_seeds = -(-p["eval_seeds"] * len(normal_eval) // len(ev_tracks))
         bank, eval_bank = make_bank(tr), make_bank(ev_tracks)
         key, k_reset = jax.random.split(key)
         env_state, obs = de.compiled("reset", s.env)(bank, k_reset)
         carry = loop.Carry(env_state, obs.reshape(slots, de.OBS), agent, replay, key, steps)
         chunk = loop.make_chunk(partial(stage_a_step, cfg=s.env, w=w), s.tqc, p["chunk"], p["updates"], warmup_steps, learn_from)
-        print(f"width {width}: {len(tr)} training tracks, {len(ev_tracks)} eval tracks")
+        print(f"width {width}: {len(tr)} training tracks, {len(ev_tracks)} eval tracks x {eval_seeds} runs")
 
         budget = a.steps or p["steps_per_width"]
         start = int(carry.steps)
-        next_eval = start + p["eval_every"]
+        eval_every = a.eval_every or p["eval_every"]
+        next_eval = start + eval_every
         best, stale = None, 0
         t_width = time.time()
         while int(carry.steps) - start < budget and stale < sa["patience"]:
@@ -145,8 +154,8 @@ def main(argv=None):
                 flush=True,
             )
             if n >= next_eval:
-                next_eval += p["eval_every"]
-                r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], p["eval_seeds"])
+                next_eval += eval_every
+                r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], eval_seeds)
                 log({"kind": "eval", "width": width, "env_steps": n, **r})
                 info_ckpt = {**meta, "width": width, "env_steps": n, "eval": r}
                 checkpoint.save(out / "latest.npz", carry.agent, info_ckpt)
