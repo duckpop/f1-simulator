@@ -54,8 +54,8 @@ quali_s = 720.0             # their length (Q3's 12 minutes), two runs each
 warmup = 10_000             # transitions per profile before the first update
 
 [preset.laptop]             # RTX 3050 Ti, 4 GB: debugging and small runs
-races = 8
-replay = 200_000            # transitions
+races = 64                  # stage A: one car per race; a step costs about the same for 8 or 256 races
+replay = 1_000_000          # transitions (~0.43 KB each)
 tracks = 16                 # training tracks on the GPU at once (~14 MB each)
 chunk = 500                 # environment steps per jitted call
 updates = 1                 # gradient steps per environment step
@@ -63,7 +63,8 @@ eval_every = 25_000         # environment steps
 eval_laps = 5
 eval_seeds = 1
 steps_per_width = 400_000   # at most, environment steps
-races_b = 4                 # stage B: races per batch (x 22 cars)
+races_b = 16                # stage B: races per batch (x 22 cars), 64 learning cars per profile
+replay_b = 250_000          # stage B: per profile (four of them)
 steps_b = 200_000
 
 [preset.cluster]            # the real runs
@@ -77,4 +78,5 @@ eval_laps = 50
 eval_seeds = 2
 steps_per_width = 5_000_000
 races_b = 64                # ~1,400 cars per step
+replay_b = 1_000_000
 steps_b = 5_000_000

@@ -196,7 +196,7 @@ def main(argv=None):
         base, info = checkpoint.load(init, template)
         agents.append(tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha))
         slots = R * int((seats == PROFILES.index(s.profile)).sum())
-        replays.append(rp.new(rp.rows_for(p["replay"], slots), slots, de.OBS, de.ACTIONS))
+        replays.append(rp.new(rp.rows_for(p.get("replay_b", p["replay"]), slots), slots, de.OBS, de.ACTIONS))
         print(f"{s.profile:>10}: from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)  d={s.tqc.drop} H0={s.tqc.target_entropy} gamma={s.tqc.gamma}")
     K = sb["snapshots"]
     pool = stack([agents[k % len(agents)].actor for k in range(K)])

@@ -173,13 +173,20 @@ Choices made while building (open points in the spec):
 
 ## Speed (laptop, RTX 3050 Ti)
 
-- The environment alone: ~900 steps/s at 4 races x 1 car (~1.1 ms per step, the lidar included).
-- Stage A training with the full-size brain: ~145 environment steps/s at 8 races (1,200 transitions/s, one gradient
-  step per environment step). The gradient step is the cost; the cluster preset runs 64 races.
-- The season eval: ~450 steps/s with 22 cars and four drivers, about the same for 4 parallel seasons (`--seasons 4`)
-  as for one. A full season is ~4 million steps, ~2.5 hours on the laptop.
-- Stage B: ~35 environment steps/s at 4 races x 22 cars (~3,000 car-steps/s), each step followed by a gradient step for
-  each of the four profiles. Compiling the four learners and the full grid takes about a minute.
+A step costs about the same whatever it carries, so the presets fill each step with many races; the gradient steps are
+the rest of the cost.
+
+| | Steps/s | Per second |
+|---|---|---|
+| The environment alone, 8 to 256 one-car races | ~370 | up to ~95,000 car-steps (v2: ~3,500) |
+| One TQC gradient step (5 critics x 512 · 512 · 512, batch 256) | ~185 | |
+| Stage A, 64 races (laptop preset), one gradient step per step | ~130 | ~8,500 transitions; peak 2.3 GB of GPU memory |
+| Stage B, 16 races x 22 cars (laptop preset), a gradient step per profile per step | ~38 | ~10,000 learning transitions (~2,500 per profile); peak 2.2 GB |
+| The season eval, 22 cars, four drivers | ~450 | the same for 4 parallel seasons; a full season ~2.5 hours |
+
+With one gradient step per environment step, more races per step means each transition is reused less (about 4 times
+at 64 races); the spec leaves that ratio to be tuned on the cluster (`updates` in the preset). Compiling the four
+learners and the full grid takes about a minute.
 
 ## What's where
 
