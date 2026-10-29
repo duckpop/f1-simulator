@@ -4,8 +4,8 @@
     f1sim-train --profile smooth --tracks tracks --preset cluster                 # from Middle's stage A best
     f1sim-train --profile middle --generate 4 --eval-tracks 2 --preset laptop     # no pool: a small smoke run
 
-Each width (~26 m, ~20 m, then the 12-15 m tracks) trains until the eval stops improving for `patience` evals (or
-`steps_per_width`); the replay buffer and the networks carry on to the next width. The eval runs on the eval tracks
+Each width (~26 m, ~20 m, then the 12-15 m tracks) trains until the eval stops improving for `patience` evals once
+cars finish races (or `steps_per_width`); the replay buffer and the networks carry on to the next width. The eval runs on the eval tracks
 at the same width. Everything is written to runs/<profile>/stage-a/: log.jsonl (every chunk and eval), latest.npz,
 best-<width>.npz and best.npz (the best eval on the 12-15 m tracks).
 
@@ -166,9 +166,9 @@ def main(argv=None):
                     if width == "normal" and evaluate.better(r, best_overall):
                         best_overall = r
                         checkpoint.save(out / "best.npz", carry.agent, info_ckpt)
-                else:
+                elif best["finish_rate"] > 0:  # "stops improving" only counts once cars finish races
                     stale += 1
-                note = "  (best)" if improved else f"  (no better: {stale}/{sa['patience']})"
+                note = "  (best)" if improved else (f"  (no better: {stale}/{sa['patience']})" if best["finish_rate"] > 0 else "  (no better; nothing finishes yet)")
                 print(f"  eval at {width}: {evaluate.summary(r)}{note}", flush=True)
         agent, replay, key, steps = carry.agent, carry.replay, carry.key, carry.steps
         print(f"width {width} done: {int(steps) - start:,} steps in {(time.time() - t_width) / 60:.1f} min; best eval: {evaluate.summary(best) if best else 'none'}")

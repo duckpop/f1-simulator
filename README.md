@@ -96,7 +96,8 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
   ended; n-step returns and the next inputs are found when sampling (`src/f1sim/replay.py`).
 
 **Stage A** (`train.py`): one car per race, on wide copies of the tracks first (~26 m, then ~20 m), then the 12-15 m
-tracks, moving on when the eval at that width stops improving. Middle trains first, from scratch; the other three start
+tracks, moving on when the eval at that width stops improving once cars finish races (until then, at the width's step
+budget). Middle trains first, from scratch; the other three start
 from its best stage A networks with their own settings and rewards. The eval at a wide width runs on the eval tracks'
 wide copies that fit (at 26 m only 2 of the 10 do, at 20 m 5), each run more times so every width's eval has as many
 races; if none fit, it runs on the normal ones.

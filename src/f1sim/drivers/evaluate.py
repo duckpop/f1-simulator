@@ -88,10 +88,11 @@ def alone(bank, actor, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None, 
 
 
 def better(a: dict, b: dict | None) -> bool:
-    """Is eval a better than b: a higher finish rate, then fewer crashes per lap, then faster laps."""
+    """Is eval a better than b: a higher finish rate (while nothing finishes: more laps driven), then fewer crashes per
+    lap, then faster laps."""
     if b is None:
         return True
-    key = lambda r: (round(r["finish_rate"], 4), -round(r["crashes_per_lap"], 5), -r["lap_ratio"] if r["lap_ratio"] > 0 else -9.0)
+    key = lambda r: (round(r["finish_rate"], 4), round(r["laps"]) if r["finish_rate"] == 0 else 0, -round(r["crashes_per_lap"], 5), -r["lap_ratio"] if r["lap_ratio"] > 0 else -9.0)
     return key(a) > key(b)
 
 
