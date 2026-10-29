@@ -83,6 +83,7 @@ class EnvState(NamedTuple):
     tick: jax.Array  # (R,) steps since the race started
     mem: rewards.Memory
     plan: jax.Array  # (R, C, runs) qualifying: when each car leaves its garage (inf in races)
+    pick: jax.Array  # (2,) new sessions draw their track from bank slots [pick[0], pick[0] + pick[1]) (track rotation)
 
 
 class Out(NamedTuple):
@@ -133,11 +134,19 @@ def _select(mask, new, old):
     return jax.tree.map(pick, new, old)
 
 
-def new_races(bank, key, cfg: EnvConfig, tid=None):
-    """(RaceState, time limit (R,), tyre thresholds (R, C), qualifying plan (R, C, runs)) for R new sessions."""
+def all_tracks(bank):
+    return jnp.array([0, bank.length.shape[0]], jnp.int32)
+
+
+def new_races(bank, key, cfg: EnvConfig, tid=None, pick=None):
+    """(RaceState, time limit (R,), tyre thresholds (R, C), qualifying plan (R, C, runs)) for R new sessions, each on a
+    random track from bank slots pick = (first, count) (default: all)."""
     r, c = cfg.races, cfg.cars
     k_tid, k_laps, k_up, k_grid, k_race, k_worn, k_quali = jax.random.split(key, 7)
-    tid = jax.random.randint(k_tid, (r,), 0, bank.length.shape[0]) if tid is None else jnp.asarray(tid, jnp.int32)
+    if tid is None:
+        pick = all_tracks(bank) if pick is None else pick
+        tid = pick[0] + jax.random.randint(k_tid, (r,), 0, pick[1])
+    tid = jnp.asarray(tid, jnp.int32)
     laps = race_laps(bank, tid, k_laps, cfg)
     setup = random_levels(k_up, r, c, per_team=False) if cfg.upgrades else None
     if not cfg.random_grid:
@@ -165,19 +174,20 @@ def _inputs(bank, race, readings, prev_edge, last, flags, cfg: EnvConfig):
     return observe.driver(bank, race, readings, prev_edge, last, (flags[..., 0], flags[..., 1], flags[..., 2]), cfg.race)
 
 
-def _wrap(bank, race, limit, worn, plan, cfg: EnvConfig):
+def _wrap(bank, race, limit, worn, plan, cfg: EnvConfig, pick=None):
     r, c = race.s.shape
     z = jnp.zeros((r, c), jnp.float32)
     last = RaceActions(z, z, z, z, z)
     flags = jnp.zeros((r, c, 3), bool)
     readings = observe.lidar(bank, race)
-    state = EnvState(race, readings.edge, last, flags, worn, limit, jnp.zeros(r, jnp.int32), rewards.new_memory(race.timing.place), plan)
+    pick = all_tracks(bank) if pick is None else jnp.asarray(pick, jnp.int32)
+    state = EnvState(race, readings.edge, last, flags, worn, limit, jnp.zeros(r, jnp.int32), rewards.new_memory(race.timing.place), plan, pick)
     return state, _inputs(bank, race, readings, readings.edge, last, flags, cfg)
 
 
-def reset(bank, key, cfg: EnvConfig, tid=None):
-    race, limit, worn, plan = new_races(bank, key, cfg, tid)
-    return _wrap(bank, race, limit, worn, plan, cfg)
+def reset(bank, key, cfg: EnvConfig, tid=None, pick=None):
+    race, limit, worn, plan = new_races(bank, key, cfg, tid, pick)
+    return _wrap(bank, race, limit, worn, plan, cfg, pick)
 
 
 def from_race(bank, race, key, cfg: EnvConfig, plan=None):
@@ -194,10 +204,20 @@ def from_race(bank, race, key, cfg: EnvConfig, plan=None):
 
 def _restart(bank, s: EnvState, mask, key, cfg: EnvConfig) -> EnvState:
     """New sessions in place of those in `mask` (R,)."""
-    race, limit, worn, plan = new_races(bank, key, cfg)
+    race, limit, worn, plan = new_races(bank, key, cfg, pick=s.pick)
     z = jnp.zeros_like(s.last.steer)
-    fresh = EnvState(race, s.prev_edge, RaceActions(z, z, z, z, z), jnp.zeros_like(s.flags), worn, limit, jnp.zeros_like(s.tick), rewards.new_memory(race.timing.place), plan)
+    fresh = EnvState(race, s.prev_edge, RaceActions(z, z, z, z, z), jnp.zeros_like(s.flags), worn, limit, jnp.zeros_like(s.tick), rewards.new_memory(race.timing.place), plan, s.pick)
     return _select(mask, fresh, s)
+
+
+def restart_races(bank, s: EnvState, obs, mask, key, cfg: EnvConfig):
+    """Restart the sessions in mask (R,) now (their track is being swapped out): (state, inputs). The others carry on
+    with their inputs unchanged."""
+    s = _restart(bank, s, mask, key, cfg)
+    readings = observe.lidar(bank, s.race)
+    fresh = _inputs(bank, s.race, readings, readings.edge, s.last, s.flags, cfg)
+    edge = jnp.where(mask[:, None, None], readings.edge, s.prev_edge)
+    return s._replace(prev_edge=edge), jnp.where(mask[:, None, None], fresh, obs)
 
 
 def controlled(race):
@@ -240,7 +260,7 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
     end = jnp.where(terminal, TERMINAL, jnp.where(valid & over[:, None], CUT, CONTINUE)).astype(jnp.int8)
     worn_at = jnp.where(ev.pit_fitted, principal.draw_worn(k_worn, s.worn_at.shape, cfg.worn), s.worn_at)
     flags = jnp.stack([ev.drs_available, ev.drs_open, ev.ers_on], axis=-1)
-    nxt = EnvState(new, s.prev_edge, acts, flags, worn_at, s.limit, s.tick + 1, mem, s.plan)
+    nxt = EnvState(new, s.prev_edge, acts, flags, worn_at, s.limit, s.tick + 1, mem, s.plan, s.pick)
 
     restarted = jnp.zeros_like(over)
     if cfg.auto_reset:
@@ -274,5 +294,5 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
 
 @lru_cache(maxsize=32)
 def compiled(name: str, cfg: EnvConfig):
-    """reset / from_race / race_done for one config, jit-compiled once and reused (evals call them every session)."""
-    return jax.jit(partial({"reset": reset, "from_race": from_race, "race_done": race_done}[name], cfg=cfg))
+    """reset / from_race / race_done / restart_races for one config, jit-compiled once and reused."""
+    return jax.jit(partial({"reset": reset, "from_race": from_race, "race_done": race_done, "restart_races": restart_races}[name], cfg=cfg))

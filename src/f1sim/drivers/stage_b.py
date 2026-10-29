@@ -41,7 +41,7 @@ from .. import replay as rp
 from . import env as de
 from . import evaluate, rewards
 from .config import PROFILES, load
-from .tracks import eval_tracks, training_tracks
+from .tracks import Rotation, eval_tracks, rotate_races
 
 CARS = 22
 
@@ -174,6 +174,9 @@ def main(argv=None):
     ap.add_argument("--steps", type=int, help="override steps_b (environment steps)")
     ap.add_argument("--eval-every", type=int, help="override eval_every (environment steps)")
     ap.add_argument("--snapshot-every", type=int, help="override snapshot_every (environment steps)")
+    ap.add_argument("--rotate-every", type=int, help="override rotate_every (environment steps; 0: keep one set of tracks)")
+    ap.add_argument("--tracks-per-set", type=int, help="override tracks (two sets are on the GPU when rotating)")
+    ap.add_argument("--replay", type=int, help="override replay_b (transitions per profile)")
     ap.add_argument("--out", default="runs")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
@@ -183,6 +186,7 @@ def main(argv=None):
     settings = [load(p, a.preset) for p in PROFILES]
     s0 = settings[0]
     p, sb = s0.preset, s0.stage_b
+    p.update({k: v for k, v in (("tracks", a.tracks_per_set), ("replay_b", a.replay)) if v})
     cfgs = [s.tqc for s in settings]
     seats = seat_layout(CARS, sb["per_profile"])
     env_cfg = s0.env._replace(races=p["races_b"], cars=CARS, quali_share=sb["quali_share"], quali_s=sb["quali_s"])
@@ -203,10 +207,10 @@ def main(argv=None):
     n_frozen = int((seats < 0).sum())
     print(f"{R} races x {CARS} cars: {sb['per_profile']} per profile learning, {n_frozen} frozen ({K} snapshots); {100 * sb['quali_share']:.0f}% qualifying")
 
-    tracks = training_tracks(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed)
-    bank, eval_bank = make_bank(tracks), make_bank(eval_tracks(a.tracks, "normal", a.eval_tracks))
+    rot = Rotation(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed, generate=bool(a.generate))
+    bank, eval_bank = rot.bank, make_bank(eval_tracks(a.tracks, "normal", a.eval_tracks))
     key, k_reset, k_pool = jax.random.split(key, 3)
-    env_state, obs = de.compiled("reset", env_cfg)(bank, k_reset)
+    env_state, obs = de.compiled("reset", env_cfg)(bank, k_reset, pick=rot.pick)
     league = League(env_state, obs, tuple(agents), tuple(replays), pool, jax.random.randint(k_pool, (R, n_frozen), 0, K), key, jnp.zeros((), jnp.int32))
     learn_from = max(int(sb["warmup"]) // (R * sb["per_profile"]), s0.tqc.batch // (R * sb["per_profile"]) + s0.tqc.n_step + 1)
     weights = np.stack([s.weights for s in settings])
@@ -219,6 +223,9 @@ def main(argv=None):
     budget = a.steps or p["steps_b"]
     eval_every, snap_every = a.eval_every or p["eval_every"], a.snapshot_every or sb["snapshot_every"]
     next_eval, next_snap, slot, turn = eval_every, snap_every, 0, 0
+    rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
+    next_rotate = rotate_every if rot.rotates and rotate_every else None
+    print(f"training tracks: {rot.describe()}")
     best: dict[str, dict | None] = {s.profile: None for s in settings}
     t_start = time.time()
     while int(league.steps) < budget:
@@ -234,6 +241,12 @@ def main(argv=None):
             parts.append(f"{name[:3]} cr {r['crashes']:3.0f} lap {r['laps']:4.0f} ov {r['overtakes']:3.0f}" + (f" r {r['reward_per_step']:5.2f}" if "reward_per_step" in r else ""))
         print(f"{n:>9,} steps {rec['env_steps_per_s']:5.0f}/s | " + " | ".join(parts), flush=True)
 
+        if next_rotate and n >= next_rotate:  # a fresh set of training tracks
+            next_rotate += rotate_every
+            bank, env_state, obs, hit = rotate_races(rot, league.env, league.obs, jax.random.fold_in(league.key, n), env_cfg)
+            cut = tuple(rp.cut_last(buf, jnp.asarray(np.repeat(hit, int((seats == q).sum())))) for q, buf in enumerate(league.replays))
+            league = league._replace(env=env_state, obs=obs, replays=cut)
+            print(f"  tracks: {rot.describe()}; {int(hit.sum())} races restarted", flush=True)
         if n >= next_snap:  # a copy of one profile's actor into the pool, replacing the oldest
             next_snap += snap_every
             league = push_snapshot(league, slot, league.agents[turn].actor)

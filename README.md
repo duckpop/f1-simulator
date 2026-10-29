@@ -83,7 +83,12 @@ pull on shared weights.
 `src/f1sim/drivers/env.py`: f1env races, batched as races x cars and jit-compiled, with everything a step needs on the
 GPU (the env step, the replay and the gradient steps run together in one `lax.scan`, `src/f1sim/loop.py`).
 
-- Each race: a random track of the bank, 5 laps up to the full 305 km (half of them long enough to need a pit stop),
+- **Track rotation** (`Rotation` in `tracks.py`): the GPU holds two sets of `tracks` (16 on the laptop, 200 on the
+  cluster) and new races draw from the newer set. Every `rotate_every` steps (100k on the laptop) the older set is
+  swapped for the next block of the shuffled pool, so a run works through every track before any comes back; each race
+  gets at least a full interval to finish, and only races still on the swapped set restart (their last step is
+  marked as cut in the replay). The track data is padded to fixed sizes, so a swap doesn't recompile the training step.
+- Each race: a random track of the active set, 5 laps up to the full 305 km (half of them long enough to need a pit stop),
   a random grid slot, a standing start, f1env's weather (rain in 20% of races).
 - Every car gets random upgrade levels each race (each category 0-10, per car).
 - **The training principal** (`principal.py`) boxes each stint at a tyre life drawn from 8-12%, for the next-harder
@@ -196,7 +201,7 @@ the rest of the cost.
 |---|---|---|
 | The environment alone, 8 to 256 one-car races | ~370 | up to ~95,000 car-steps (v2: ~3,500) |
 | One TQC gradient step (5 critics x 512 · 512 · 512, batch 256) | ~185 | |
-| Stage A, 64 races (laptop preset), one gradient step per step | ~130 | ~8,500 transitions; peak 2.3 GB of GPU memory |
+| Stage A, 64 races (laptop preset), one gradient step per step | ~130 | ~8,500 transitions; peak 2.3 GB of GPU memory with one set of tracks (two sets with rotation: ~0.3 GB more, not yet measured) |
 | Stage B, 16 races x 22 cars (laptop preset), a gradient step per profile per step | ~38 | ~10,000 learning transitions (~2,500 per profile); peak 2.2 GB |
 | The season eval, 22 cars, four drivers | ~450 | the same for 4 parallel seasons; a full season ~2.5 hours |
 

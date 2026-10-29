@@ -56,7 +56,8 @@ warmup = 10_000             # transitions per profile before the first update
 [preset.laptop]             # RTX 3050 Ti, 4 GB: debugging and small runs
 races = 64                  # stage A: one car per race; a step costs about the same for 8 or 256 races
 replay = 1_000_000          # transitions (~0.43 KB each)
-tracks = 16                 # training tracks on the GPU at once (~14 MB each)
+tracks = 16                 # training tracks in a set; two sets on the GPU (~14 MB a track)
+rotate_every = 100_000      # environment steps between fresh sets of tracks, so a run works through the pool
 chunk = 500                 # environment steps per jitted call
 updates = 1                 # gradient steps per environment step
 eval_every = 25_000         # environment steps
@@ -71,6 +72,7 @@ steps_b = 200_000
 races = 64
 replay = 1_000_000
 tracks = 200
+rotate_every = 250_000
 chunk = 1000
 updates = 1
 eval_every = 50_000

@@ -105,3 +105,12 @@ def sample(buf: Replay, key, batch: int, n: int, gamma: float, candidates: int =
     ret, discount, k = nstep(buf.reward[idx, s[:, None]], buf.end[idx, s[:, None]], buf.valid[idx, s[:, None]], n, gamma)
     t_next = jnp.take_along_axis(idx, k[:, None], axis=1)[:, 0]
     return Batch(buf.obs[t0, s], buf.action[t0, s], ret, discount, buf.obs[t_next, s])
+
+
+def cut_last(buf: Replay, mask) -> Replay:
+    """Mark the last step written as CUT for the slots in mask (S,): their sessions were restarted from outside the
+    environment step (a track swap), so the next row isn't a continuation."""
+    i = (buf.ptr - 1) % buf.reward.shape[0]
+    end = buf.end[i]
+    end = jnp.where(mask & buf.valid[i] & (end == CONTINUE), CUT, end).astype(end.dtype)
+    return buf._replace(end=buf.end.at[i].set(end))
