@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .. import checkpoint, loop, nets, tqc
+from ..stop import StopFlag
 from .. import replay as rp
 from . import env as de
 from . import evaluate, rewards, season
@@ -234,7 +235,8 @@ def main(argv=None):
         if bar:
             print(f"{name:>10}: best so far {evaluate.summary_mixed(bar)}")
     t_start = time.time()
-    while int(league.steps) < budget:
+    stop = StopFlag()
+    while int(league.steps) < budget and not stop.asked:
         t0 = time.time()
         league, (stats, metrics) = chunk(league, bank)
         jax.block_until_ready(league.steps)

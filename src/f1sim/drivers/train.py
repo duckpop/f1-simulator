@@ -31,6 +31,7 @@ import numpy as np
 from f1env.sensors import make_bank
 
 from .. import checkpoint, loop, tqc
+from ..stop import StopFlag
 from .. import replay as rp
 from . import env as de
 from . import evaluate, rewards
@@ -127,7 +128,10 @@ def main(argv=None):
     if best_overall:
         print(f"best so far on the normal tracks: {evaluate.summary(best_overall)}")
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
+    stop = StopFlag()
     for i_width, width in enumerate(widths):
+        if stop.asked:
+            break
         rot = Rotation(a.tracks, width, a.generate or p["tracks"], seed=a.seed + i_width, generate=bool(a.generate))
         # the eval at a wide width: the eval tracks' copies that fit, each run more times so every width's eval has as
         # many races; if none fit, the normal eval tracks
@@ -150,7 +154,7 @@ def main(argv=None):
         next_rotate = start + rotate_every if rot.rotates and rotate_every else None
         best, stale = None, 0
         t_width = time.time()
-        while int(carry.steps) - start < budget and stale < sa["patience"]:
+        while int(carry.steps) - start < budget and stale < sa["patience"] and not stop.asked:
             t0 = time.time()
             carry, (info, m) = chunk(carry, bank)
             jax.block_until_ready(carry.steps)
