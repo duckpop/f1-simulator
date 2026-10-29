@@ -137,6 +137,11 @@ def _state_text(race, i: int) -> str:
 
 def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn: bool = False, seconds: float = 0.0, seed: int = 0, title: str = "", speed: float = 1.0, follow: int = 0, save: bool = False, close_when_done: bool = False):
     """Race in a window, in real time (x speed). Returns (Recorder or None, final RaceState)."""
+    if os.environ.get("QT_QPA_PLATFORMTHEME", "").lower() in ("", "gtk3", "gtk2", "gtk", "gnome", "xdgdesktopportal"):
+        # Qt's GTK 3 theme loads the system's GTK 3, which aborts on GNOME 50 (it reads the antialiasing key that
+        # gnome-settings-daemon 50 removed); Qt's own generic theme doesn't touch GTK
+        os.environ["QT_QPA_PLATFORMTHEME"] = "generic"
+    os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.wayland.textinput=false")  # harmless input-method chatter
     import matplotlib
 
     matplotlib.use("QtAgg")

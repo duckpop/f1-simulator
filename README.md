@@ -139,7 +139,9 @@ between following a car and the whole track, n / p pick the next / previous car,
 (`--speed` to start at another). `--save` also records the race and writes f1env's HTML replay page when the window is
 closed (play, scrub, zoom, follow any car, the race log); `--no-window` only writes that.
 
-The window needs the `live` extra (matplotlib and PyQt6: `uv pip install -e ".[live]"`). It runs on the CPU by
+The window needs the `live` extra (matplotlib and PyQt6: `uv pip install -e ".[live]"`). It uses Qt's generic theme:
+Qt's GTK 3 theme loads the system's GTK 3, which aborts on GNOME 50 (it reads a setting gnome-settings-daemon 50
+removed). It runs on the CPU by
 default (`--device gpu` to change), where one race is quick (about 1 ms a step alone, 4 ms with 22 cars), so it neither
 slows down nor queues behind a training run on the GPU: ~30 frames/s with 22 cars on the laptop.
 
