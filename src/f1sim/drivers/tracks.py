@@ -52,6 +52,13 @@ def eval_tracks(pool, width="normal", n: int = EVAL_TRACKS):
     return widened(tracks, width)
 
 
+def eval_track(pool, k: int = 0):
+    """Eval track k (0-9) at its normal width."""
+    if pool is None:
+        return generatemap(seed=EVAL_SEED0 + k)
+    return load_track(Path(pool) / load_pool(pool)["eval"][k]["file"])
+
+
 def widened(tracks, width):
     """Copies at a wider width, leaving out those that don't fit (at 26 m only ~2 of the 10 eval tracks do)."""
     w = _width(width)

@@ -217,7 +217,8 @@ def race_done(bank, race, limit, cfg: EnvConfig):
     return ~jnp.any(going, axis=-1) | (race.clock >= limit) | (race.flag & ~jnp.any(running & ~race.dnf, axis=-1))
 
 
-def step(bank, s: EnvState, action, key, cfg: EnvConfig):
+def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
+    """One 20 Hz step. events=True also returns f1env's RaceEvents (the viewer records from them)."""
     k_worn, k_reset = jax.random.split(key)
     acts = to_race_actions(action)
     race = s.race
@@ -268,7 +269,7 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig):
     dyn = ev.dynamics
     slipping = (dyn.wheelspin > SLIPPING) | (dyn.lockup_front > SLIPPING) | (dyn.lockup_rear > SLIPPING)
     out = Out(amounts, valid, end, valid & ev.lap_done, valid & ev.records.under_attack, jnp.where(valid, ev.records.lost, 0), valid & slipping)
-    return nxt, obs, out, info
+    return (nxt, obs, out, info, ev) if events else (nxt, obs, out, info)
 
 
 @lru_cache(maxsize=32)

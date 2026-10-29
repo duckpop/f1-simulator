@@ -118,6 +118,22 @@ contact, the safety car and blue flags.
   respawn): points per race, finish rate, out on lap 1, crashes per lap, overtakes, places lost and time held under
   attack. Each profile keeps its best checkpoint (most points per race) in `runs/<profile>/stage-b/best.npz`.
 
+## Watching a driver
+
+```bash
+f1sim-watch --tracks tracks                          # Middle's current best, alone, on eval track 0, 5 laps
+f1sim-watch --tracks tracks --track 3 --seconds 120  # another eval track, the first two minutes
+f1sim-watch --tracks tracks --cars 22 --laps 10      # the same driver in all 22 cars
+f1sim-watch --profile smooth --tracks tracks         # any profile; or --checkpoint <file>
+```
+
+It records one race with f1env's viewer and writes `runs/watch/<profile>-<track>-<width>.html`: one page to open in any
+browser (play, pause, scrub, zoom, follow a car, the timing tower and race log). The default driver is the profile's
+newest best checkpoint (stage B's, else stage A's best, else the newest `best-<width>.npz` while the curriculum is
+still on the wide tracks), at the width it was saved at; at 26 m only eval tracks 3 and 7 have a wide copy, other
+tracks fall back to the normal width. It uses the mean action, the default car and the training principal; add
+`--respawn` to let crashed cars rejoin as in training.
+
 ## Evaluation
 
 `f1sim-season` (`src/f1sim/drivers/season.py`) runs Phase 2's tests on the 10 fixed eval tracks with the default car

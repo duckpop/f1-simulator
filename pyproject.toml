@@ -25,6 +25,7 @@ f1sim-train = "f1sim.drivers.train:main"
 f1sim-train-b = "f1sim.drivers.stage_b:main"
 f1sim-eval = "f1sim.drivers.evaluate:main"
 f1sim-season = "f1sim.drivers.season:main"
+f1sim-watch = "f1sim.drivers.watch:main"
 f1sim-check-tqc = "f1sim.pendulum:main"
 
 [tool.hatch.metadata]
