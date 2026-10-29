@@ -101,7 +101,7 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
   ended; n-step returns and the next inputs are found when sampling (`src/f1sim/replay.py`).
 
 **Stage A** (`train.py`): one car per race, on wide copies of the tracks first (~26 m, then ~20 m), then the 12-15 m
-tracks, moving on when the eval at that width stops improving once cars finish races (until then, at the width's step
+tracks, moving on when the eval (50 laps alone on each eval track, every 50k steps on the laptop) stops improving once cars finish races (until then, at the width's step
 budget). Middle trains first, from scratch; the other three start
 from its best stage A networks with their own settings and rewards. The eval at a wide width runs on the eval tracks'
 wide copies that fit (at 26 m only 2 of the 10 do, at 20 m 5), each run more times so every width's eval has as many
@@ -119,9 +119,11 @@ contact, the safety car and blue flags.
   every 100k steps. A frozen car drives one snapshot (its mean action) for a whole session.
 - 20% of sessions are 12-minute qualifying sessions: every car starts in its garage and goes out twice on new softs
   (f1env's default runs), so flying laps and the "session" input get learned. A run ends when the car parks.
-- The eval races the four current profiles against each other on the eval tracks (5-6 cars each, the default car, no
-  respawn): points per race, finish rate, out on lap 1, crashes per lap, overtakes, places lost and time held under
-  attack. Each profile keeps its best checkpoint (most points per race) in `runs/<profile>/stage-b/best.npz`.
+- The eval is a full weekend on every eval track, as in F1: Q1, Q2 and Q3 set the grid, then a 50-lap race (`eval_laps`),
+  the four current profiles against each other (5-6 cars each, the default car, no respawn): points per race, finish
+  rate, out on lap 1, crashes per lap, time off the track, overtakes, places lost and attacks held. Each profile keeps
+  its best checkpoint (most points per race) in `runs/<profile>/stage-b/best.npz`. It runs every `eval_every_b` steps
+  (50k on the laptop).
 
 ## Watching a driver
 

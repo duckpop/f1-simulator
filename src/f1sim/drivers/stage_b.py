@@ -14,8 +14,9 @@
   current actor (in turn), replacing the oldest. A frozen car drives one snapshot (its mean action) for a whole
   session, drawn again when the session restarts.
 - 20% of sessions are short qualifying sessions (`quali_share`), so flying laps and the "session" input are learned.
-- The eval: mixed races on the eval tracks, every seat a learning profile (5-6 cars each), the default car, no
-  respawn. Each profile keeps its best checkpoint (most points per race, then finishes) in runs/<profile>/stage-b/.
+- The eval: a full weekend on every eval track (Q1, Q2 and Q3 set the grid, then a race of `eval_laps` laps), every
+  seat a learning profile (5-6 cars each), the default car, no respawn. Each profile keeps its best checkpoint (most
+  points per race, then finishes) in runs/<profile>/stage-b/.
 """
 
 from __future__ import annotations
@@ -34,12 +35,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from f1env.sensors import make_bank
-
 from .. import checkpoint, loop, nets, tqc
 from .. import replay as rp
 from . import env as de
-from . import evaluate, rewards
+from . import evaluate, rewards, season
 from .config import PROFILES, load
 from .tracks import Rotation, eval_tracks, rotate_races
 
@@ -172,7 +171,7 @@ def main(argv=None):
     ap.add_argument("--eval-tracks", type=int, default=10)
     ap.add_argument("--init-all", help="start every profile from this checkpoint (default: each one's stage A best)")
     ap.add_argument("--steps", type=int, help="override steps_b (environment steps)")
-    ap.add_argument("--eval-every", type=int, help="override eval_every (environment steps)")
+    ap.add_argument("--eval-every", type=int, help="override eval_every_b (environment steps)")
     ap.add_argument("--snapshot-every", type=int, help="override snapshot_every (environment steps)")
     ap.add_argument("--rotate-every", type=int, help="override rotate_every (environment steps; 0: keep one set of tracks)")
     ap.add_argument("--tracks-per-set", type=int, help="override tracks (two sets are on the GPU when rotating)")
@@ -208,7 +207,8 @@ def main(argv=None):
     print(f"{R} races x {CARS} cars: {sb['per_profile']} per profile learning, {n_frozen} frozen ({K} snapshots); {100 * sb['quali_share']:.0f}% qualifying")
 
     rot = Rotation(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed, generate=bool(a.generate))
-    bank, eval_bank = rot.bank, make_bank(eval_tracks(a.tracks, "normal", a.eval_tracks))
+    bank = rot.bank
+    eval_env = season.weekend_env(eval_tracks(a.tracks, "normal", a.eval_tracks), p["eval_laps"])  # Q1-Q3, then the race
     key, k_reset, k_pool = jax.random.split(key, 3)
     env_state, obs = de.compiled("reset", env_cfg)(bank, k_reset, pick=rot.pick)
     league = League(env_state, obs, tuple(agents), tuple(replays), pool, jax.random.randint(k_pool, (R, n_frozen), 0, K), key, jnp.zeros((), jnp.int32))
@@ -221,7 +221,7 @@ def main(argv=None):
         o.mkdir(parents=True, exist_ok=True)
     log_file = open(Path(a.out) / "stage-b-log.jsonl", "a")
     budget = a.steps or p["steps_b"]
-    eval_every, snap_every = a.eval_every or p["eval_every"], a.snapshot_every or sb["snapshot_every"]
+    eval_every, snap_every = a.eval_every or p.get("eval_every_b", p["eval_every"]), a.snapshot_every or sb["snapshot_every"]
     next_eval, next_snap, slot, turn = eval_every, snap_every, 0, 0
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
     next_rotate = rotate_every if rot.rotates and rotate_every else None
@@ -253,7 +253,7 @@ def main(argv=None):
             slot, turn = (slot + 1) % K, (turn + 1) % len(PROFILES)
         if n >= next_eval:
             next_eval += eval_every
-            res = evaluate.mixed(eval_bank, [ag.actor for ag in league.agents], cfgs[0], p["eval_laps"], p["eval_seeds"])
+            res = season.eval_weekend(eval_env, [ag.actor for ag in league.agents], cfgs[0], p["eval_seeds"], log=print)
             log_file.write(json.dumps({"kind": "eval", "env_steps": n, **res}) + "\n")
             log_file.flush()
             for s, ag in zip(settings, league.agents):

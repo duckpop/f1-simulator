@@ -3,8 +3,8 @@ respawn and each actor's mean action.
 
 - **Alone** (`alone`): one car per race; the finish rate, crashes per lap, lap time (against each track's lap
   simulation) and tyre stints.
-- **Mixed** (`mixed`): 22-car races, every seat one of the profiles (5-6 cars each) from a random grid; per profile the
-  points per race, finish rate, cars out on lap 1, crashes per lap, overtakes, places lost and time held under attack.
+- **Mixed**: stage B's eval is a full weekend per eval track (`season.eval_weekend`); `better_mixed` and
+  `summary_mixed` rank and print its per-profile results.
 
     f1sim-eval --checkpoint runs/middle/stage-a/best.npz --tracks tracks --laps 50
 
@@ -104,76 +104,6 @@ def summary(r: dict) -> str:
     return f"finished {100 * r['finish_rate']:.0f}%  {crashes}  lap x{r['lap_ratio']:.3f} of the lap sim  off track {100 * r.get('off_track_share', 0.0):.1f}%  {r['laps_per_stint']:.1f} laps/stint  ({r['laps']:.0f} laps)"
 
 
-def mixed_seats(cars: int, profiles: int) -> np.ndarray:
-    return np.arange(cars) % profiles
-
-
-@lru_cache(maxsize=8)
-def _mixed_runner(ecfg: de.EnvConfig, cfg: tqc.TQCConfig, steps: int, seats: tuple):
-    seats = np.asarray(seats)
-    idx = [np.flatnonzero(seats == p) for p in range(int(seats.max()) + 1)]
-
-    @jax.jit
-    def run(bank, actors, state, obs, acc, key):
-        def body(c, k):
-            state, obs, acc = c
-            actions = jnp.zeros((ecfg.races, ecfg.cars, de.ACTIONS))
-            for p, sl in enumerate(idx):
-                a = tqc.act(actors[p], cfg, obs[:, sl].reshape(-1, de.OBS), k, mean=True)
-                actions = actions.at[:, sl].set(a.reshape(ecfg.races, len(sl), de.ACTIONS))
-            state, obs, out, _ = de.step(bank, state, actions, k, ecfg)
-            return (state, obs, {"amounts": acc["amounts"] + out.amounts, "laps": acc["laps"] + out.lap_done, "valid": acc["valid"] + out.valid}), None
-
-        (state, obs, acc), _ = jax.lax.scan(body, (state, obs, acc), jax.random.split(key, steps))
-        return state, obs, acc
-
-    return run
-
-
-def mixed(bank, actors, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None, chunk: int = 2000, max_steps: int = 2_000_000, names=None) -> dict:
-    """22-car races on every track in the bank (`seeds` times each), `laps` laps; actors: one per profile."""
-    names = names or PROFILES[: len(actors)]
-    key = jax.random.PRNGKey(54321) if key is None else key
-    n = int(bank.length.shape[0])
-    r = n * seeds
-    seats = mixed_seats(22, len(actors))
-    ecfg = de.EnvConfig(races=r, cars=22, fixed_laps=laps, upgrades=False, random_grid=True, auto_reset=False, race=RaceConfig(respawn=False))
-    k_reset, key = jax.random.split(key)
-    state, obs = de.compiled("reset", ecfg)(bank, k_reset, tid=jnp.tile(jnp.arange(n), seeds))
-    acc = {"amounts": jnp.zeros((r, 22, len(TERMS))), "laps": jnp.zeros((r, 22)), "valid": jnp.zeros((r, 22))}
-    run = _mixed_runner(ecfg, cfg, chunk, tuple(int(x) for x in seats))
-    done_fn = de.compiled("race_done", ecfg)
-    steps = 0
-    while steps < max_steps:
-        key, k = jax.random.split(key)
-        state, obs, acc = run(bank, tuple(actors), state, obs, acc, k)
-        steps += chunk
-        if bool(np.asarray(done_fn(bank, state.race, state.limit)).all()):
-            break
-    sc = score(state.race, bank)
-    amounts, laps_done = np.asarray(acc["amounts"]), np.asarray(acc["laps"])
-    line_laps = np.floor(np.asarray(state.race.line) / np.asarray(bank.length[state.race.tid])[:, None])
-    out_lap1 = np.asarray(state.race.dnf) & (line_laps < 1)
-    t = {name: i for i, name in enumerate(TERMS)}
-    res = {"races": r, "steps": steps, "profiles": {}}
-    for p, name in enumerate(names):
-        sl = seats == p
-        cars = sl.sum() * r
-        per_car = lambda x: float(x[:, sl].sum() / cars)
-        res["profiles"][name] = {
-            "points_per_race": per_car(sc.points),
-            "finish_rate": per_car(sc.finished),
-            "out_lap1": per_car(out_lap1),
-            "crashes_per_lap": float(amounts[:, sl, t["crash"]].sum() / max(laps_done[:, sl].sum(), 1.0)),
-            "laps": float(laps_done[:, sl].sum()),
-            "overtakes_per_race": per_car(amounts[..., t["overtake"]]),
-            "places_lost_per_race": per_car(amounts[..., t["place_lost"]]),
-            "held_s_per_race": per_car(amounts[..., t["holding"]]),
-            "off_track_share": float(amounts[:, sl, t["off_track"]].sum() / max(np.asarray(acc["valid"])[:, sl].sum() * 0.05, 1e-9)),
-        }
-    return res
-
-
 def better_mixed(a: dict, b: dict | None) -> bool:
     """More points per race, then more finishes, then fewer crashes per lap."""
     if b is None:
@@ -184,9 +114,10 @@ def better_mixed(a: dict, b: dict | None) -> bool:
 
 def summary_mixed(r: dict) -> str:
     crashes = f"crashes {100 * r['crashes_per_lap']:.2f}%/lap" if r["laps"] >= 1 else f"{r['crashes_per_lap']:.0f} crashes, no lap done"
+    held = f"{100 * r['attacks_held']:.0f}%" if np.isfinite(r.get("attacks_held", np.nan)) else "-"
     return (
         f"{r['points_per_race']:5.2f} pts/race  finished {100 * r['finish_rate']:3.0f}%  out on lap 1 {100 * r['out_lap1']:3.0f}%  "
-        f"{crashes}  off track {100 * r.get('off_track_share', 0.0):.1f}%  overtakes {r['overtakes_per_race']:.2f}  lost {r['places_lost_per_race']:.2f}  held {r['held_s_per_race']:.0f} s"
+        f"{crashes}  off track {100 * r.get('off_track_share', 0.0):.1f}%  overtakes {r['overtakes_per_race']:.2f}  lost {r['places_lost_per_race']:.2f}  attacks held {held}"
     )
 
 

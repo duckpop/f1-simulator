@@ -122,20 +122,20 @@ def run_session(env: F1Env, session, actors, cfg: tqc.TQCConfig, seats, ecfg: de
     return session, tally, steps
 
 
-def season(tracks, actors, cfg: tqc.TQCConfig, seasons: int = 1, rounds: int = 24, race_km: float = 305.0, chunk: int = 2000, env: F1Env | None = None, log=print) -> dict:
-    """Full weekends over f1env's eval calendar; the four profiles' actors in seats_for()."""
+def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000, log=print, label=None) -> dict:
+    """Full weekends (Q1, Q2, Q3 decide the grid, then the race) for R parallel seasons: calendar (R, rounds) eval
+    tracks of `env`, round k with f1env's eval key k; the four profiles' actors in seats_for()."""
+    calendar = np.asarray(calendar)
+    seasons, rounds = calendar.shape
     seats = seats_for(len(actors))
-    env = env or F1Env(tracks, WeekendConfig(race_km=race_km))
-    wcfg = env.wcfg
-    cal = np.tile(np.asarray(EVAL_CALENDAR[:rounds]), (seasons, 1))
-    s = env.reset_season(jax.random.PRNGKey(2026), calendar=cal, profiles=np.tile(seats, (seasons, 1)))
-    ecfg = de.EnvConfig(races=seasons, cars=CARS, upgrades=False, auto_reset=False, quali=True, race=wcfg.race)
+    s = env.reset_season(jax.random.PRNGKey(2026), calendar=calendar, profiles=np.tile(seats, (seasons, 1)))
+    ecfg = de.EnvConfig(races=seasons, cars=CARS, upgrades=False, auto_reset=False, quali=True, race=env.wcfg.race)
     keys = eval_keys()
     total, out_lap1, grids = None, [], []
     for rnd in range(rounds):
         t0, n = time.time(), 0
         for i, kind in enumerate(("Q1", "Q2", "Q3", "race")):
-            k = jax.random.fold_in(keys[rnd], i)
+            k = jax.random.fold_in(keys[rnd % len(keys)], i)
             session = env.start_session(s, kind, key=k)
             session, tally, steps = run_session(env, session, actors, cfg, seats, ecfg, k, chunk)
             n += steps
@@ -147,14 +147,31 @@ def season(tracks, actors, cfg: tqc.TQCConfig, seasons: int = 1, rounds: int = 2
                 grids.append(np.asarray(s.quali["grid"]))
             s = env.end_session(s, session)
         h = s.history[-1]
-        winner = np.argmin(h["place"], axis=-1)
         if log:
-            log(
-                f"round {rnd + 1:>2}/{rounds} ({env.tracks[cal[0, rnd]].name}): won by {', '.join(PROFILES[seats[w]] for w in winner)}; "
-                f"finished {100 * np.mean(h['finished']):.0f}%  ({n:,} steps in {time.time() - t0:.0f} s)",
-                flush=True,
-            )
+            where = label(rnd) if label else f"round {rnd + 1}"
+            winners = ", ".join(PROFILES[seats[w]] for w in np.argmin(h["place"], axis=-1))
+            log(f"{where}: won by {winners}; finished {100 * np.mean(h['finished']):.0f}%  ({n:,} steps in {time.time() - t0:.0f} s)", flush=True)
     return summarise(s, total, np.stack(out_lap1, axis=1), np.stack(grids, axis=1), seats, rounds)
+
+
+def season(tracks, actors, cfg: tqc.TQCConfig, seasons: int = 1, rounds: int = 24, race_km: float = 305.0, chunk: int = 2000, env: F1Env | None = None, log=print) -> dict:
+    """Full weekends over f1env's eval calendar."""
+    env = env or F1Env(tracks, WeekendConfig(race_km=race_km))
+    cal = np.tile(np.asarray(EVAL_CALENDAR[:rounds]), (seasons, 1))
+    label = lambda rnd: f"round {rnd + 1:>2}/{rounds} ({env.tracks[cal[0, rnd]].name})"
+    return weekends(env, actors, cfg, cal, chunk, log, label)
+
+
+def weekend_env(tracks, laps: int = 50) -> F1Env:
+    """f1env's weekends on these tracks with races of `laps` laps (Q1-Q3 as in F1)."""
+    return F1Env(tracks, WeekendConfig(race_laps=(laps, laps)))
+
+
+def eval_weekend(env: F1Env, actors, cfg: tqc.TQCConfig, seeds: int = 1, chunk: int = 2000, log=None) -> dict:
+    """Stage B's eval: one full weekend on every track of `env` (`seeds` times each, in parallel), the four profiles
+    racing each other. The per-profile results of `summarise` (points per race, finishes, out on lap 1, style)."""
+    n = len(env.tracks)
+    return weekends(env, actors, cfg, np.tile(np.arange(n), seeds)[:, None], chunk, log, lambda rnd: f"eval weekend on {n} tracks")
 
 
 def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int) -> dict:

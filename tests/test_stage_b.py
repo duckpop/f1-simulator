@@ -49,10 +49,19 @@ def test_league_chunk(bank):
         np.testing.assert_array_equal(np.asarray(leaf_pool[1]), np.asarray(leaf_actor))
 
 
-def test_mixed_eval(bank):
+@pytest.mark.slow
+def test_eval_weekend(tracks):
+    from f1env.env import F1Env
+    from f1env.weekend import WeekendConfig
+
+    from f1sim.drivers import season
+
     actors = [tqc.init(jax.random.PRNGKey(p), tiny(2)).actor for p in range(4)]
-    r = evaluate.mixed(bank, actors, tiny(2), laps=1)
-    assert r["races"] == 2 and set(r["profiles"]) == {"middle", "aggressive", "smooth", "defensive"}
+    env = F1Env(tracks, WeekendConfig(race_laps=(1, 1), quali_sessions=((120.0, 6), (120.0, 6), (120.0, 0))))
+    r = season.eval_weekend(env, actors, tiny(2))
+    assert set(r["profiles"]) == {"middle", "aggressive", "smooth", "defensive"}
     for p in r["profiles"].values():
         assert 0 <= p["finish_rate"] <= 1 and 0 <= p["out_lap1"] <= 1 and p["points_per_race"] >= 0
+    assert sum(r["profiles"][p]["mean_grid_slot"] * n for p, n in zip(r["profiles"], (6, 6, 5, 5))) == pytest.approx(sum(range(1, 23)))  # the grid is qualifying's
     assert evaluate.better_mixed({"points_per_race": 3.0, "finish_rate": 0.5, "crashes_per_lap": 0.1}, {"points_per_race": 2.0, "finish_rate": 0.9, "crashes_per_lap": 0.0})
+    print(evaluate.summary_mixed(r["profiles"]["middle"]))
