@@ -4,6 +4,8 @@
     f1sim-watch --tracks tracks --cars 22 --track 3      # the same driver in all 22 cars
     f1sim-watch --tracks tracks --save                   # also write runs/watch/<profile>-<track>-<width>.html
     f1sim-watch --tracks tracks --no-window              # no window (on the cluster): only the HTML replay
+    f1sim-watch --tracks tracks --profiles middle,aggressive,defensive --save   # 22 cars, car k drives the k-th
+                                                         # profile (mod 3), each car labelled with its profile
 
 It runs on the CPU unless --device gpu: one race is quick there, and a training run keeps the GPU to itself.
 
@@ -60,13 +62,18 @@ def newest_best(runs, profile: str) -> Path:
     raise FileNotFoundError(f"no checkpoint for {profile} under {base} yet (the first is saved at the first eval)")
 
 
-@partial(jax.jit, static_argnames=("cfg", "ecfg", "keep"))
-def _run(bank, actor, st, obs, keys, cfg, ecfg, keep):
-    """len(keys) steps with the actor's mean action in every car; keep: also every step's race state and events."""
+@partial(jax.jit, static_argnames=("cfg", "ecfg", "keep", "seats"))
+def _run(bank, actors, st, obs, keys, cfg, ecfg, keep, seats):
+    """len(keys) steps, car k driven by actors[seats[k]] (its mean action); keep: also every step's race state and
+    events."""
+    groups = [(actor, np.flatnonzero(np.asarray(seats) == p)) for p, actor in enumerate(actors)]
 
     def body(c, k):
         st, obs = c
-        a = tqc.act(actor, cfg, obs.reshape(-1, de.OBS), k, mean=True).reshape(1, ecfg.cars, de.ACTIONS)
+        a = jnp.zeros((1, ecfg.cars, de.ACTIONS))
+        for actor, idx in groups:
+            if len(idx):
+                a = a.at[:, idx].set(tqc.act(actor, cfg, obs[:, idx].reshape(-1, de.OBS), k, mean=True).reshape(1, len(idx), de.ACTIONS))
         st, obs, _, _, ev = de.step(bank, st, a, k, ecfg, events=True)
         return (st, obs), ((st.race, ev) if keep else None)
 
@@ -74,11 +81,14 @@ def _run(bank, actor, st, obs, keys, cfg, ecfg, keep):
 
 
 class Race:
-    """One race on `track`, the same actor in every car, stepped in compiled blocks (compiled once per block size and
-    setup, shared between races). With a recorder, every step's state and events are copied back once per block."""
+    """One race on `track`, stepped in compiled blocks (compiled once per block size and setup, shared between races).
+    `actor`: one actor in every car, or a list of actors (car k drives actor k mod n). With a recorder, every step's
+    state and events are copied back once per block."""
 
     def __init__(self, track, actor, cfg: tqc.TQCConfig, cars: int, laps: int, respawn: bool, seed: int):
-        self.bank, self.actor, self.cfg = make_bank([track]), actor, cfg
+        self.bank, self.cfg = make_bank([track]), cfg
+        self.actors = tuple(actor) if isinstance(actor, list) else (actor,)
+        self.seats = tuple(k % len(self.actors) for k in range(cars))
         ecfg = de.EnvConfig(races=1, cars=cars, fixed_laps=laps, upgrades=False, random_grid=cars > 1, auto_reset=False, race=RaceConfig(respawn=respawn))
         self.ecfg = ecfg
         self.key = jax.random.PRNGKey(seed)
@@ -89,7 +99,7 @@ class Race:
     def steps(self, n: int, rec: Recorder | None = None):
         keys = jax.random.split(self.key, n + 1)
         self.key = keys[0]
-        (self.state, self.obs), hist = _run(self.bank, self.actor, self.state, self.obs, keys[1:], cfg=self.cfg, ecfg=self.ecfg, keep=rec is not None)
+        (self.state, self.obs), hist = _run(self.bank, self.actors, self.state, self.obs, keys[1:], cfg=self.cfg, ecfg=self.ecfg, keep=rec is not None, seats=self.seats)
         if rec is not None:
             races, events = jax.device_get(hist)
             for j in range(n):
@@ -104,10 +114,10 @@ class Race:
         return float(self.state.race.clock[0])
 
 
-def record(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn: bool = False, seconds: float = 0.0, seed: int = 0, title: str = "", max_steps: int = 400_000):
-    """No window: (Recorder, final RaceState) for one race."""
+def record(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn: bool = False, seconds: float = 0.0, seed: int = 0, title: str = "", max_steps: int = 400_000, labels=None):
+    """No window: (Recorder, final RaceState) for one race. labels: a name per car for the replay (e.g. its profile)."""
     race = Race(track, actor, cfg, cars, laps, respawn, seed)
-    rec = Recorder(track, race=0, title=title or track.name)
+    rec = Recorder(track, race=0, title=title or track.name, labels=labels)
     for _ in range(max_steps // 40):
         race.steps(40, rec)
         if (seconds and race.clock >= seconds) or race.over:
@@ -137,8 +147,9 @@ def _state_text(race, i: int) -> str:
     return "pit lane" if stage else ("crashed earlier, rejoined" if race.dnf[0, i] else "racing")
 
 
-def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn: bool = False, seconds: float = 0.0, seed: int = 0, title: str = "", speed: float = 1.0, follow: int = 0, save: bool = False, close_when_done: bool = False):
-    """Race in a window, in real time (x speed). Returns (Recorder or None, final RaceState)."""
+def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn: bool = False, seconds: float = 0.0, seed: int = 0, title: str = "", speed: float = 1.0, follow: int = 0, save: bool = False, close_when_done: bool = False, labels=None):
+    """Race in a window, in real time (x speed). Returns (Recorder or None, final RaceState). labels: a name per car
+    (e.g. its profile), in the side panel and the replay."""
     if os.environ.get("QT_QPA_PLATFORMTHEME", "").lower() in ("", "gtk3", "gtk2", "gtk", "gnome", "xdgdesktopportal"):
         # Qt's GTK 3 theme loads the system's GTK 3, which aborts on GNOME 50 (it reads the antialiasing key that
         # gnome-settings-daemon 50 removed); Qt's own generic theme doesn't touch GTK
@@ -153,7 +164,8 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
     from f1env.tracks.render import render_track
 
     race = Race(track, actor, cfg, cars, laps, respawn, seed)
-    rec = Recorder(track, race=0, title=title or track.name) if save else None
+    rec = Recorder(track, race=0, title=title or track.name, labels=labels) if save else None
+    name = lambda j: f" {labels[j]:<10}" if labels else ""
     # compile every block size now, not while the window is up (a compile freezes it for seconds); the start lights are
     # on for at least 5 s, so these first steps change nothing
     t0 = time.perf_counter()
@@ -180,7 +192,7 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
     bodies = PolyCollection(np.zeros((cars, 4, 2)), facecolors=colors, edgecolors="black", linewidths=0.6, zorder=6)
     ax.add_collection(bodies)
     dots = ax.scatter(np.zeros(cars), np.zeros(cars), s=36, c=colors, edgecolors="black", linewidths=0.6, zorder=7)
-    labels = [ax.text(0, 0, str(i + 1), fontsize=8, ha="center", va="bottom", fontweight="bold", zorder=8) for i in range(cars)]
+    numbers = [ax.text(0, 0, str(i + 1), fontsize=8, ha="center", va="bottom", fontweight="bold", zorder=8) for i in range(cars)]
     # the car's readout and the timing tower live in a Qt side panel: matplotlib redraws every glyph every frame, Qt
     # only when the text changes
     from PyQt6 import QtCore, QtGui, QtWidgets
@@ -189,7 +201,7 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
     panel.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont))
     panel.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop | QtCore.Qt.AlignmentFlag.AlignLeft)
     panel.setMargin(8)
-    panel.setMinimumWidth(330)
+    panel.setMinimumWidth(420 if labels else 330)
     dock = QtWidgets.QDockWidget("Race", fig.canvas.manager.window)
     dock.setWidget(panel)
     dock.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
@@ -239,7 +251,7 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
         for t, (tx, ty) in track_labels:
             t.set_visible(lim[0] < tx < lim[1] and lim[2] < ty < lim[3])
         inside = shown & (centres[:, 0] > lim[0]) & (centres[:, 0] < lim[1]) & (centres[:, 1] > lim[2]) & (centres[:, 1] < lim[3])
-        for j, t in enumerate(labels):  # text is the costly part of a frame: only the cars in view get their number
+        for j, t in enumerate(numbers):  # text is the costly part of a frame: only the cars in view get their number
             t.set_visible(bool(inside[j]))
             if inside[j]:
                 t.set_position((centres[j, 0], centres[j, 1] + 3.0))
@@ -248,13 +260,13 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
         kmh = float(np.hypot(c.vx[0, i], c.vy[0, i])) * 3.6
         tyre = f"{COMPOUNDS[int(race.tyres.compound[0, i])]} {100 * float(race.tyres.life[0, i]):.0f}%"
         flags = "  DRS" if race.drs_open[0, i] else ""
-        top = f"Car {i + 1}  P{int(race.timing.place[0, i])}/{cars}  lap {lap(i)}/{int(race.target_laps[0])}  {kmh:3.0f} km/h"
+        top = f"Car {i + 1}{name(i).rstrip()}  P{int(race.timing.place[0, i])}/{cars}  lap {lap(i)}/{int(race.target_laps[0])}  {kmh:3.0f} km/h"
         mode = "PAUSED" if view["paused"] else f"x{view['speed']:g}"
         end = "  race over (close the window)" if ended else ""
         text = f"{_clock(float(race.clock[0]))}  {mode}{end}\n\n{top}\n{tyre}  ERS {10 * float(race.battery[0, i]):.0f}%{flags}\n{_state_text(race, i)}"
         if cars > 1:
             order = np.argsort(race.timing.place[0])
-            rows_ = [f"{'>' if j == i else ' '}P{int(race.timing.place[0, j]):>2}  car {j + 1:>2}  L{lap(j):>2}  {COMPOUNDS[int(race.tyres.compound[0, j])][0].upper()} {100 * float(race.tyres.life[0, j]):3.0f}%  {_state_text(race, j)[:8]}" for j in order]
+            rows_ = [f"{'>' if j == i else ' '}P{int(race.timing.place[0, j]):>2}  car {j + 1:>2}{name(j)}  L{lap(j):>2}  {COMPOUNDS[int(race.tyres.compound[0, j])][0].upper()} {100 * float(race.tyres.life[0, j]):3.0f}%  {_state_text(race, j)[:8]}" for j in order]
             text += "\n\n" + "\n".join(rows_)
         text += "\n\n" + KEYS.replace("  ", "\n")
         if text != view.get("text"):
@@ -299,12 +311,13 @@ def live(track, actor, cfg: tqc.TQCConfig, cars: int = 1, laps: int = 5, respawn
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Watch a trained driver race, live, and optionally save an HTML replay.")
     ap.add_argument("--profile", default="middle", choices=PROFILES)
+    ap.add_argument("--profiles", help="several profiles, comma-separated: car k drives the k-th (mod n), each from its newest best, labelled")
     ap.add_argument("--checkpoint", help="default: the profile's newest best under --runs")
     ap.add_argument("--runs", default="runs")
     ap.add_argument("--tracks", help="track pool directory; default: generate the eval track")
     ap.add_argument("--track", type=int, default=0, help="eval track 0-9")
     ap.add_argument("--width", help='"normal", 26 or 20 (default: the width the checkpoint was saved at)')
-    ap.add_argument("--cars", type=int, default=1, help="1 (alone) up to 22, all driven by this driver")
+    ap.add_argument("--cars", type=int, help="1 (alone) up to 22, all driven by this driver (default: 1, with --profiles 22)")
     ap.add_argument("--laps", type=int, default=5)
     ap.add_argument("--seconds", type=float, default=0.0, help="stop after this much race time (0: the whole race)")
     ap.add_argument("--respawn", action="store_true", help="crashed cars rejoin from the pit exit (as in training)")
@@ -315,37 +328,54 @@ def main(argv=None):
     ap.add_argument("--device", default="cpu", choices=["cpu", "gpu"], help="cpu (default) leaves the GPU to a training run")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
+    names = a.profiles.split(",") if a.profiles else []
+    if set(names) - set(PROFILES) or len(set(names)) != len(names):
+        ap.error(f"--profiles takes different profiles from {', '.join(PROFILES)}, comma-separated: {a.profiles}")
+    if names and a.checkpoint:
+        ap.error("--profiles takes each profile's newest best: give --profiles or --checkpoint, not both")
+    cars = a.cars or (22 if names else 1)
     if a.device == "cpu":  # one race is quick on the CPU, and doesn't queue behind (or slow down) training on the GPU
         jax.config.update("jax_platforms", "cpu")
 
-    path = Path(a.checkpoint) if a.checkpoint else newest_best(a.runs, a.profile)
-    info = checkpoint.meta(path)
-    s = load(info.get("profile", a.profile), info.get("preset", "laptop"))
-    agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc))
+    drivers = []  # (path, meta, settings, agent) per profile
+    for p in names or [a.profile]:
+        path = Path(a.checkpoint) if a.checkpoint else newest_best(a.runs, p)
+        info = checkpoint.meta(path)
+        s = load(info.get("profile", p), info.get("preset", "laptop"))
+        agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc))
+        drivers.append((path, info, s, agent))
+    path, info, s, _ = drivers[0]
     width = a.width or info.get("width", "normal")
     base = eval_track(a.tracks, a.track)
     track = next(iter(widened([base], width)), None)
     if track is None:
         print(f"{base.name} has no copy at {width} m: racing on the normal track")
         track, width = base, "normal"
-    title = f"{s.profile} ({info.get('env_steps', 0):,} steps, stage {info.get('stage', '?')}) on {base.name}, width {width}"
+    if names:
+        title = f"{', '.join(p.capitalize() for p in names)} on {base.name}, width {width}"
+        actor, labels = [d[3].actor for d in drivers], [names[k % len(names)].capitalize() for k in range(cars)]
+    else:
+        title = f"{s.profile} ({info.get('env_steps', 0):,} steps, stage {info.get('stage', '?')}) on {base.name}, width {width}"
+        actor, labels = drivers[0][3].actor, None
     window = not a.no_window and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not window and not a.no_window:
         print("no display: recording the race to an HTML replay instead")
-    print(f"{'watching' if window else 'recording'}: {title} from {path}", flush=True)
+    print(f"{'watching' if window else 'recording'}: {title}", flush=True)
+    for d_path, d_info, d_s, _ in drivers:
+        print(f"  {d_s.profile}: {d_path} ({d_info.get('env_steps', 0):,} steps, stage {d_info.get('stage', '?')})")
     if window:
-        rec, race = live(track, agent.actor, s.tqc, a.cars, a.laps, a.respawn, a.seconds, a.seed, title, a.speed, a.follow - 1, save=bool(a.save))
+        rec, race = live(track, actor, s.tqc, cars, a.laps, a.respawn, a.seconds, a.seed, title, a.speed, a.follow - 1, save=bool(a.save), labels=labels)
     else:
-        rec, race = record(track, agent.actor, s.tqc, a.cars, a.laps, a.respawn, a.seconds, a.seed, title)
+        rec, race = record(track, actor, s.tqc, cars, a.laps, a.respawn, a.seconds, a.seed, title, labels=labels)
 
     laps = np.floor(race.line[0] / track.length).astype(int)
     finished, out = race.finish_pos[0] > 0, race.dnf[0]
     best = np.where(np.isfinite(race.best_lap[0]), race.best_lap[0], np.nan)
-    print(f"race time {max(float(race.clock[0]), 0):.0f} s: {int(finished.sum())} of {a.cars} finished, {int(out.sum())} crashed; most laps {max(int(laps.max()), 0)} of {a.laps}")
+    print(f"race time {max(float(race.clock[0]), 0):.0f} s: {int(finished.sum())} of {cars} finished, {int(out.sum())} crashed; most laps {max(int(laps.max()), 0)} of {a.laps}")
     if np.isfinite(best).any():
         print(f"best lap {np.nanmin(best):.1f} s (the lap simulation's ideal: {track.lap['lap_time_s']:.1f} s)")
     if rec is not None and (a.save or not window):
-        dest = Path(a.save) if a.save and a.save != "auto" else Path(a.runs) / "watch" / f"{s.profile}-{base.name}-{width}.html"
+        dest = Path(a.save) if a.save and a.save != "auto" else Path(a.runs) / "watch" / f"{'-'.join(names) or s.profile}-{base.name}-{width}.html"
         dest.parent.mkdir(parents=True, exist_ok=True)
         write_html(dest, rec.replay())
         print(f"replay written: {dest}  (open it in a browser: xdg-open {dest})")
