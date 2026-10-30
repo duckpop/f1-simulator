@@ -26,6 +26,15 @@ def test_seats():
         stage_b.seat_layout(22, 6)
 
 
+def test_init_paths():
+    inits = {"smooth": "runs/middle/stage-b/best.npz"}
+    assert stage_b.init_path("smooth", "runs", inits) == "runs/middle/stage-b/best.npz"
+    assert stage_b.init_path("smooth", "runs", inits, resume=True, init_all="x.npz") == "runs/middle/stage-b/best.npz"
+    assert stage_b.init_path("middle", "runs", inits) == "runs/middle/stage-a/best.npz"
+    assert stage_b.init_path("middle", "runs", inits, resume=True) == "runs/middle/stage-b/latest.npz"
+    assert stage_b.init_path("middle", "runs", inits, init_all="x.npz") == "x.npz"
+
+
 def test_league_chunk(bank):
     cfgs = [tiny(d) for d in (2, 1, 1, 2)]  # different truncations compile side by side
     seats = stage_b.seat_layout(22, 4)
