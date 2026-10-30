@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # the environment, pinned: a change to f1env changes what the drivers learn on
-    "f1env @ git+ssh://git@github.com/duckpop/f1env.git@69cbf5256d099cd4e05cf97a43fc6590ebdf5d35",
+    "f1env @ git+ssh://git@github.com/duckpop/f1env.git@c55a26c56390b8daffaae888b4058408e7bc4da9",
     "jax>=0.4.35",
     "optax>=0.2.3",
     "numpy>=1.26",
