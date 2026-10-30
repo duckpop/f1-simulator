@@ -43,6 +43,7 @@ f1sim-train --profile smooth --tracks tracks --preset cluster    # starts from M
 f1sim-eval --checkpoint runs/middle/stage-a/best.npz --tracks tracks --laps 50
 f1sim-train-b --tracks tracks --preset cluster    # stage B: all four together, each from its stage A best
 f1sim-train-b --tracks tracks --preset cluster --resume   # after a stop: each profile from its stage B latest.npz
+f1sim-train-b --tracks tracks --init smooth=runs/middle/stage-b/best.npz   # one profile from a given checkpoint
 f1sim-season --tracks tracks                      # Phase 2's evaluation and the comparison with v2
 ```
 
@@ -74,10 +75,10 @@ pull on shared weights.
 
 | Profile | d (atoms dropped) | Target entropy | gamma (horizon) | Starts from |
 |---|---|---|---|---|
-| Middle | 2 (10 of 125) | -2.0 | 0.995 (10 s) | scratch |
-| Aggressive | 1 (5) | -1.5 | 0.985 (3.3 s) | Middle's stage A |
-| Smooth | 3 (15) | -2.5 | 0.997 (17 s) | Middle's stage A |
-| Defensive | 2 (10) | -2.0 | 0.990 (5 s) | Middle's stage A |
+| Middle | 2 (10 of 125) | -2.0 | 0.994 (8.3 s) | scratch |
+| Aggressive | 1 (5) | -1.5 | 0.990 (5 s) | Middle's stage A |
+| Smooth | 3 (15) | -2.5 | 0.996 (12.5 s) | Middle's stage A |
+| Defensive | 2 (10) | -2.0 | 0.992 (6.3 s) | Middle's stage A |
 
 ## The training environment
 
@@ -134,6 +135,8 @@ f1sim-watch --tracks tracks --cars 22 --track 3      # the same driver in all 22
 f1sim-watch --tracks tracks --save                   # also save the race as runs/watch/<profile>-<track>-<width>.html
 f1sim-watch --tracks tracks --no-window              # no window (on the cluster): only the HTML replay
 f1sim-watch --profile smooth --tracks tracks         # any profile; or --checkpoint <file>
+f1sim-watch --tracks tracks --profiles middle,aggressive,defensive --save   # 22 cars, car k drives profile k mod 3,
+                                                     # each car labelled with its profile (tower, log, followed car)
 ```
 
 A window shows the race as it runs, in real time: f1env's track drawing with the cars on it, following one car, and a
@@ -181,29 +184,41 @@ separately (`runs/<profile>/stage-a/log.jsonl`).
 | Term | Base | Middle | Aggressive | Smooth | Defensive |
 |---|---|---|---|---|---|
 | Progress, on the track | +1 per step at top speed (as v2) | | | | |
-| Crash (ends the episode) | -70 | | | -300 | |
+| Crash (ends the episode) | -70 | | -40 | -200 | -120 |
 | Warning (the 4th is a black flag) | -50 | | | | |
 | Bump (under 20 km/h) | -2 | | | | |
 | Pit lane entered on a call | +5 | | | | |
 | Dead tyre | -2 per s | | | | |
 | Finish | +50 | | | | |
 | Off the track (the car's centre); its progress doesn't count either | -2 per s | | | | |
+| Standing still (under 1 m/s on the track, not queuing behind a moving car) | -20 per s | | | | |
 | Overtake (held 2 s) | +20 | 1x | 2x | 0.5x | 0.5x |
-| Place lost | -20 | 1x | 0.5x | 1x | 2x |
+| Place lost | -25 | 1x | 0.6x | 1x | 1.8x |
 | Holding under attack | +1 per s | 1x | 0.5x | 0.5x | 2x |
 | Inside line, under attack | +2 per s | 0 | 0 | 0 | 1x |
 | Tyre wear | -10 per % of life | 1x | 0.5x | 2x | 1x |
-| Smoothness: input changes / wheelspin and lock-ups | -0.05 / -0.2 per unit | 1x | 0.5x | 2x | 1x |
+| Smoothness: input changes / wheelspin and lock-ups | -0.05 / -0.2 per unit | 1x | 0.5x | 1.5x | 1x |
+| Qualifying place: 21 points for P1 down to 0 for P22 (no time: 0) | +1 per point | | | | |
+| Qualifying: in the top 16 (would move on to Q2) / in the top 10 (Q3) | +3 / +5 | | | | |
+| Qualifying: a new personal best lap (the first time included) | +3 | | | | |
+
+The qualifying terms are paid as the standing changes, not at the flag (minutes away, far beyond any horizon): a car
+gets a place's points when its lap puts it there and gives them back when another car's lap pushes it down while it's
+out on track, so over a session it collects what its final place is worth. Training's qualifying sessions are one
+22-car session, so the top 16 and top 10 stand in for moving on to Q2 and Q3.
 
 For f1env's scripted driver, tyre wear costs ~5% of the progress reward and the smoothness terms almost nothing.
 
-A profile can replace base values in its own `[rewards]` table. Smooth's crash costs -300: a crash ends the episode,
+A profile can replace base values in its own `[rewards]` table: the crash costs -40 for Aggressive (bolder) and -120
+for Defensive (more careful). Smooth's crash costs -200: a crash ends the episode,
 so it has to cost more than driving on at a loss. With its doubled tyre and smoothness costs a learning Smooth lost
-~0.8 per step (~270 over its 333-step horizon), and at -70 it learned to crash on purpose in stage B.
+~0.8 per step (~270 over its 333-step horizon), and at -70 it learned to crash on purpose in stage B. At -300 it
+stopped doing that (+0.10 per step without its crashes, 250k steps into the next stage B run), but its crashes then
+cost -0.36 per step and swamped every other term, so it went to -140, and its smoothness from 2x to 1.5x; then to -200.
 
 Choices made while building (open points in the spec):
 
-- **No farming by swapping places:** with Aggressive's weights an overtake is worth 4x a place lost, so two cars could
+- **No farming by swapping places:** with Aggressive's weights an overtake is worth 2.7x a place lost, so two cars could
   gain by passing each other back and forth. An overtake pays only for a place better than the best one already paid
   this episode.
 - **No corner cutting:** f1env has no track limits (run-off only has less grip) and progress is measured along the
