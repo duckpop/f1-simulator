@@ -11,3 +11,8 @@ holding = 0.5
 inside_line = 0.0
 tyre_wear = 2.0
 smoothness = 2.0
+
+[rewards]                   # this profile's own base values (replacing drivers.toml's)
+# a crash ends the episode, so it has to cost more than driving on at a loss: with the doubled tyre and smoothness
+# costs a learning Smooth lost ~0.8 per step, ~270 over its 333-step horizon, and at -70 learned to crash on purpose
+crash = -300.0

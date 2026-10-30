@@ -1,7 +1,7 @@
 import pytest
 
 from f1sim.drivers import rewards
-from f1sim.drivers.config import PROFILES, load
+from f1sim.drivers.config import CONFIGS, PROFILES, load
 
 
 @pytest.mark.parametrize("preset", ["laptop", "cluster"])
@@ -22,3 +22,16 @@ def test_profiles_match_the_spec():
         s = load(name)
         assert (s.tqc.drop, s.tqc.target_entropy, s.tqc.gamma, s.start_from) == (d, h0, gamma, start)
         assert tuple(s.styles[k] for k in rewards.STYLES) == mult
+
+
+def test_a_profile_can_replace_base_values():
+    crash = rewards.TERMS.index("crash")
+    assert {p: float(load(p).weights[crash]) for p in PROFILES} == {"middle": -70.0, "aggressive": -70.0, "smooth": -300.0, "defensive": -70.0}
+
+
+def test_unknown_reward_terms_are_refused(tmp_path):
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "drivers.toml").write_text((CONFIGS / "drivers.toml").read_text())
+    (tmp_path / "profiles" / "smooth.toml").write_text((CONFIGS / "profiles" / "smooth.toml").read_text() + "crashes = -1.0\n")
+    with pytest.raises(ValueError, match="unknown reward terms"):
+        load("smooth", configs=tmp_path)

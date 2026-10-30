@@ -72,12 +72,16 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
     if unknown:
         raise ValueError(f"{profile}: unknown style terms {sorted(unknown)} (have: {', '.join(rewards.STYLES)})")
     styles = {s: float(own.get("weights", {}).get(s, 1.0)) for s in rewards.STYLES}
+    unknown = set(own.get("rewards", {})) - set(rewards.TERMS)
+    if unknown:
+        raise ValueError(f"{profile}: unknown reward terms {sorted(unknown)} (have: {', '.join(rewards.TERMS)})")
+    base = {**shared.get("rewards", {}), **own.get("rewards", {})}  # a profile's own base values replace the shared ones
     return Settings(
         profile=profile,
         description=own.get("description", ""),
         tqc=cfg,
         env=env,
-        weights=rewards.weights(shared.get("rewards"), styles),
+        weights=rewards.weights(base, styles),
         styles=styles,
         start_from=own.get("start_from", ""),
         stage_a=shared["stage_a"],

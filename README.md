@@ -181,7 +181,7 @@ separately (`runs/<profile>/stage-a/log.jsonl`).
 | Term | Base | Middle | Aggressive | Smooth | Defensive |
 |---|---|---|---|---|---|
 | Progress, on the track | +1 per step at top speed (as v2) | | | | |
-| Crash (ends the episode) | -70 | | | | |
+| Crash (ends the episode) | -70 | | | -300 | |
 | Warning (the 4th is a black flag) | -50 | | | | |
 | Bump (under 20 km/h) | -2 | | | | |
 | Pit lane entered on a call | +5 | | | | |
@@ -196,6 +196,10 @@ separately (`runs/<profile>/stage-a/log.jsonl`).
 | Smoothness: input changes / wheelspin and lock-ups | -0.05 / -0.2 per unit | 1x | 0.5x | 2x | 1x |
 
 For f1env's scripted driver, tyre wear costs ~5% of the progress reward and the smoothness terms almost nothing.
+
+A profile can replace base values in its own `[rewards]` table. Smooth's crash costs -300: a crash ends the episode,
+so it has to cost more than driving on at a loss. With its doubled tyre and smoothness costs a learning Smooth lost
+~0.8 per step (~270 over its 333-step horizon), and at -70 it learned to crash on purpose in stage B.
 
 Choices made while building (open points in the spec):
 
