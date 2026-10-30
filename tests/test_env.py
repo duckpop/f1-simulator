@@ -66,6 +66,31 @@ def test_lights_then_driving(bank, started):
     assert np.isfinite(np.asarray(obs)).all()
 
 
+def test_standing_still_costs_from_lights_out(bank, started):
+    """A car that stays on the grid after the lights go out pays the standstill term every step it's in control; one
+    that drives off pays it only for the first moment."""
+    from f1sim.drivers import rewards as rw
+
+    cfg, st, _ = started
+    k = rw.TERMS.index("standstill")
+
+    @jax.jit
+    def stood(st, throttle):
+        def body(st, kk):
+            a = jnp.zeros((3, 1, 5)).at[..., 1].set(throttle)
+            st, _, out, _ = de.step(bank, st, a, kk, cfg)
+            return st, (out.amounts[..., k], out.valid)
+
+        return jax.lax.scan(body, st, jax.random.split(jax.random.PRNGKey(0), 300))[1]
+
+    still, valid = (np.asarray(x)[:, :, 0] for x in stood(st, -1.0))  # throttle off
+    paid = np.isclose(still, 0.05)
+    assert valid.any(axis=0).all() and still[~valid].sum() == 0
+    assert all(valid[:, r].sum() - paid[:, r].sum() <= 1 for r in range(3))  # every step but the stuck-out (a crash)
+    going, valid = (np.asarray(x)[:, :, 0] for x in stood(st, 1.0))
+    assert going.sum(axis=0).max() <= 0.3  # flat out: only the first moment off the line
+
+
 def test_crash_ends_the_episode_and_the_car_rejoins(bank, started):
     cfg, st, _ = started
     a = jnp.zeros((1200, 3, 1, 5)).at[..., 0].set(1.0).at[..., 1].set(1.0)  # full lock, full throttle

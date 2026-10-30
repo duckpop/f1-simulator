@@ -1,13 +1,16 @@
 description = "Keeping position: inside line first, blocks space, tighter lines when a rival is within DRS distance (1 s)."
 drop = 2                    # 10 of 125
 target_entropy = -2.0
-gamma = 0.990               # ~100 steps, 5 s
+gamma = 0.992               # ~125 steps, 6.3 s (was 0.990)
 start_from = "middle"
 
 [weights]
 overtake = 0.5
-place_lost = 2.0
+place_lost = 1.8            # -45 (was 2 of -20, -40)
 holding = 2.0
 inside_line = 1.0
 tyre_wear = 1.0
 smoothness = 1.0
+
+[rewards]                   # this profile's own base values (replacing drivers.toml's)
+crash = -120.0              # (was -70) more careful: keeping the place matters more than any one move, as in v2 (-140)

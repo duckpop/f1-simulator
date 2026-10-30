@@ -254,7 +254,8 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
 
     new, ev = race_step(bank, race, acts, cfg.race)
     new = jax.tree.map(lambda a, b: a.astype(b.dtype), new, race)
-    amounts, mem = rewards.amounts(ev, acts, s.last, s.mem, valid, ev.respawned)
+    stopped = rewards.standing_still(new, cfg.race.blocked_gap, cfg.race.queue_speed)
+    amounts, mem = rewards.amounts(ev, acts, s.last, s.mem, valid, ev.respawned, quali=(is_q, race.best_lap, new.best_lap), stopped=stopped)
     terminal = valid & (ev.crashed | ev.finished | ev.black_flag)
     over = race_done(bank, new, s.limit, cfg)
     end = jnp.where(terminal, TERMINAL, jnp.where(valid & over[:, None], CUT, CONTINUE)).astype(jnp.int8)
