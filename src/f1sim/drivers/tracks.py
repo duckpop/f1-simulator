@@ -74,7 +74,7 @@ def widened(tracks, width):
 
 # ---- track rotation -----------------------------------------------------------------------------------------------
 
-LINE_FIELDS = ("line_x", "line_y", "line_heading", "sc_speed", "section", "next_turn", "to_brake")  # (T, samples)
+LINE_FIELDS = ("line_x", "line_y", "line_heading", "half_left", "half_right", "sc_speed", "section", "next_turn", "to_brake")  # (T, samples)
 FIELD_GRIDS = ("edge", "barrier", "surface")  # every track's grid, joined
 
 

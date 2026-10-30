@@ -1,13 +1,16 @@
 description = "Overtaking: late braking, high lateral g, takes the gaps it's offered, willing to use high-risk lines."
 drop = 1                    # 5 of 125: the most optimistic critic
 target_entropy = -1.5
-gamma = 0.985               # ~67 steps, 3.3 s
+gamma = 0.990               # ~100 steps, 5 s (was 0.985)
 start_from = "middle"
 
 [weights]
 overtake = 2.0
-place_lost = 0.5
+place_lost = 0.6            # -15 (was 0.5 of -20, -10)
 holding = 0.5
 inside_line = 0.0
 tyre_wear = 0.5
 smoothness = 0.5
+
+[rewards]                   # this profile's own base values (replacing drivers.toml's)
+crash = -40.0               # (was -70) bolder: a crash costs less than for the others, as in v2 (car contact -45)

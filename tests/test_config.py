@@ -13,10 +13,10 @@ def test_every_profile_loads(preset):
 
 def test_profiles_match_the_spec():
     spec = {  # d, H0, gamma, start from, (overtake, place lost, holding, inside line, tyre wear, smoothness)
-        "middle": (2, -2.0, 0.995, "", (1, 1, 1, 0, 1, 1)),
-        "aggressive": (1, -1.5, 0.985, "middle", (2, 0.5, 0.5, 0, 0.5, 0.5)),
-        "smooth": (3, -2.5, 0.997, "middle", (0.5, 1, 0.5, 0, 2, 2)),
-        "defensive": (2, -2.0, 0.990, "middle", (0.5, 2, 2, 1, 1, 1)),
+        "middle": (2, -2.0, 0.994, "", (1, 1, 1, 0, 1, 1)),
+        "aggressive": (1, -1.5, 0.990, "middle", (2, 0.6, 0.5, 0, 0.5, 0.5)),
+        "smooth": (3, -2.5, 0.996, "middle", (0.5, 1, 0.5, 0, 2, 1.5)),
+        "defensive": (2, -2.0, 0.992, "middle", (0.5, 1.8, 2, 1, 1, 1)),
     }
     for name, (d, h0, gamma, start, mult) in spec.items():
         s = load(name)
@@ -26,7 +26,7 @@ def test_profiles_match_the_spec():
 
 def test_a_profile_can_replace_base_values():
     crash = rewards.TERMS.index("crash")
-    assert {p: float(load(p).weights[crash]) for p in PROFILES} == {"middle": -70.0, "aggressive": -70.0, "smooth": -300.0, "defensive": -70.0}
+    assert {p: float(load(p).weights[crash]) for p in PROFILES} == {"middle": -70.0, "aggressive": -40.0, "smooth": -200.0, "defensive": -120.0}
 
 
 def test_unknown_reward_terms_are_refused(tmp_path):

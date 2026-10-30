@@ -1,7 +1,7 @@
 description = "Tyre saving: little wheelspin, smooth trail-braking, low tyre slip, steady long-run pace."
 drop = 3                    # 15 of 125 (d = 4 to compare)
 target_entropy = -2.5
-gamma = 0.997               # ~333 steps, 17 s
+gamma = 0.996               # ~250 steps, 12.5 s (was 0.997)
 start_from = "middle"
 
 [weights]
@@ -10,9 +10,11 @@ place_lost = 1.0
 holding = 0.5
 inside_line = 0.0
 tyre_wear = 2.0
-smoothness = 2.0
+smoothness = 1.5            # (was 2)
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
 # a crash ends the episode, so it has to cost more than driving on at a loss: with the doubled tyre and smoothness
-# costs a learning Smooth lost ~0.8 per step, ~270 over its 333-step horizon, and at -70 learned to crash on purpose
-crash = -300.0
+# costs a learning Smooth lost ~0.8 per step, ~270 over its 333-step horizon, and at -70 learned to crash on purpose.
+# At -300 (stage B, 250k steps) it earned +0.10 per step without its crashes, but the crashes (-0.36 per step) swamped
+# everything else, so it went to -140; then -200 (2026-10-30), still well over its ~250-step horizon of driving on
+crash = -200.0

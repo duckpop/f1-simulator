@@ -31,6 +31,47 @@ def run(steps, start_place=5):
     return total
 
 
+def test_qualifying_standing_and_laps():
+    """Points 21 for P1 down to 0 for P22 (no time: 0), +3 into the top 16, +5 into the top 10, +3 per personal best,
+    each paid when the standing changes; over a session a car collects what its final place is worth."""
+    inf = np.inf
+    a = SimpleNamespace(steer=jnp.zeros((1, 22)), throttle=jnp.zeros((1, 22)), brake=jnp.zeros((1, 22)))
+    z = jnp.zeros((1, 22))
+    i = lambda x: jnp.full((1, 22), x, jnp.int32)
+    ev = SimpleNamespace(
+        records=SimpleNamespace(gained=i(0), lost=i(0), place=i(1), under_attack=z > 0, inside_line=z > 0),
+        dynamics=SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z),
+        progress=z, crashed=z > 0, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, off_track=z > 0,
+    )
+    mem = rw.new_memory(jnp.ones((1, 22)))
+    on = jnp.ones(1, bool)
+    step = lambda old, new, q=on: np.asarray(rw.amounts(ev, a, a, mem, jnp.ones((1, 22), bool), z > 0, quali=(q, jnp.asarray([old]), jnp.asarray([new])))[0][0])
+    times = [80.0 + k for k in range(22)]  # car k is P(k + 1)
+    pts, top16, top10 = (np.asarray(x[0]) for x in rw.quali_standing(jnp.asarray([times])))
+    assert pts[0] == 21 and pts[21] == 0 and top16.sum() == 16 and top10.sum() == 10
+    # car 21 (last) sets 79.0: P1. It gains 21 points, both groups and a lap; everyone else drops a place
+    new = list(times)
+    new[21] = 79.0
+    out = step(times, new)
+    T = lambda t: out[:, TERM[t]]
+    assert T("quali_place")[21] == 21 and T("quali_q2")[21] == 1 and T("quali_q3")[21] == 1 and T("quali_lap")[21] == 1
+    assert all(T("quali_place")[:21] == -1) and T("quali_q3")[9] == -1 and T("quali_q2")[15] == -1  # P10 -> P11, P16 -> P17
+    assert T("quali_lap")[:21].sum() == 0
+    # a first time counts as a personal best; a slower lap doesn't
+    first = [inf] * 22
+    first[3] = 90.0
+    assert step([inf] * 22, first)[3, TERM["quali_lap"]] == 1 and step([inf] * 22, first)[3, TERM["quali_place"]] == 21
+    assert step(times, list(times))[:, TERM["quali_lap"]].sum() == 0
+    # not in a race
+    assert np.abs(step(times, new, jnp.zeros(1, bool))[:, [TERM[t] for t in ("quali_place", "quali_q2", "quali_q3", "quali_lap")]]).sum() == 0
+    w = dict(zip(rw.TERMS, rw.weights()))
+    assert (w["quali_place"], w["quali_q2"], w["quali_q3"], w["quali_lap"]) == (1.0, 3.0, 5.0, 3.0)
+    # standing still: per second, only for the cars flagged
+    stopped = jnp.zeros((1, 22), bool).at[0, 3].set(True)
+    out = np.asarray(rw.amounts(ev, a, a, mem, jnp.ones((1, 22), bool), z > 0, stopped=stopped)[0][0])
+    assert out[3, TERM["standstill"]] == 0.05 and out[:, TERM["standstill"]].sum() == 0.05 and w["standstill"] == -20.0
+
+
 def test_overtake_paid_once_held_for_two_seconds():
     hold = [(1, 0, 4)] + [(0, 0, 4)] * 39
     assert run(hold)[TERM["overtake"]] == 0  # 1.95 s

@@ -26,12 +26,17 @@ dead_tyre = -2.0            # per second on a dead tyre
 finish = 50.0
 off_track = -2.0            # per second with the car's centre off the track (its progress doesn't count either)
 overtake = 20.0             # per place, held 2 s
-place_lost = -20.0          # per place
+place_lost = -25.0          # per place (was -20)
 holding = 1.0               # per second, under attack
 inside_line = 2.0           # per second
 tyre_wear = -10.0           # per % of tyre life
 inputs = -0.05              # per unit of steer + throttle + brake change in a step
 slip = -0.2                 # per unit of wheelspin + lock-up in a step
+quali_place = 1.0           # qualifying, per standing point: 21 for P1 down to 0 for P22, paid as the standing changes
+quali_q2 = 3.0              # qualifying: in the top 16 (would move on to Q2)
+quali_q3 = 5.0              # qualifying: in the top 10 (would move on to Q3)
+quali_lap = 3.0             # qualifying: each new personal best lap, the first time included
+standstill = -20.0          # per second stopped (under 1 m/s) on the track, unless queuing behind a moving car
 
 [env]                       # the races (f1sim.drivers.env.EnvConfig)
 min_laps = 5

@@ -2,6 +2,7 @@
 
     f1sim-train-b --tracks tracks --preset cluster                  # each profile from its stage A best
     f1sim-train-b --generate 4 --eval-tracks 2 --init-all runs/middle/stage-a/best.npz --steps 2000   # smoke run
+    f1sim-train-b --tracks tracks --init smooth=runs/middle/stage-b/best.npz ...   # a profile from a given checkpoint
 
 - 22 cars per race on the 12-15 m tracks, with every rule f1env has: overtaking, dirty air, slipstream, DRS, contact,
   the safety car, blue flags. Seats are fixed by car number (the grid is random every race): `per_profile` cars of each
@@ -55,6 +56,16 @@ def seat_layout(cars: int = CARS, per_profile: int = 4, profiles: int = len(PROF
     seats = np.full(cars, -1)
     seats[:n] = np.arange(n) % profiles
     return seats
+
+
+def init_path(profile: str, out, inits: dict, resume: bool = False, init_all: str | None = None) -> str:
+    """The checkpoint a profile starts from: its own --init, else its stage B latest.npz (--resume), --init-all, or
+    its stage A best."""
+    if profile in inits:
+        return inits[profile]
+    if resume:
+        return str(Path(out) / profile / "stage-b" / "latest.npz")
+    return init_all or str(Path(out) / profile / "stage-a" / "best.npz")
 
 
 def stack(trees):
@@ -172,6 +183,7 @@ def main(argv=None):
     ap.add_argument("--eval-tracks", type=int, default=10)
     ap.add_argument("--init-all", help="start every profile from this checkpoint (default: each one's stage A best)")
     ap.add_argument("--resume", action="store_true", help="continue every profile from its own stage B latest.npz (after a stop)")
+    ap.add_argument("--init", action="append", default=[], metavar="PROFILE=PATH", help="start this profile from this checkpoint (repeatable; over --init-all and --resume)")
     ap.add_argument("--steps", type=int, help="override steps_b (environment steps)")
     ap.add_argument("--eval-every", type=int, help="override eval_every_b (environment steps)")
     ap.add_argument("--snapshot-every", type=int, help="override snapshot_every (environment steps)")
@@ -183,6 +195,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.tracks is None and not a.generate:
         ap.error("give a track pool (--tracks) or --generate N")
+    inits = dict(x.split("=", 1) for x in a.init if "=" in x)
+    if len(inits) != len(a.init) or set(inits) - set(PROFILES):
+        ap.error(f"--init takes PROFILE=PATH, once per profile ({', '.join(PROFILES)}): {' '.join(a.init)}")
 
     settings = [load(p, a.preset) for p in PROFILES]
     s0 = settings[0]
@@ -197,7 +212,7 @@ def main(argv=None):
     agents, replays = [], []
     for s in settings:
         template = tqc.init(jax.random.PRNGKey(0), s.tqc)
-        init = str(Path(a.out) / s.profile / "stage-b" / "latest.npz") if a.resume else a.init_all or str(Path(a.out) / s.profile / "stage-a" / "best.npz")
+        init = init_path(s.profile, a.out, inits, a.resume, a.init_all)
         base, info = checkpoint.load(init, template)
         agents.append(tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha))
         slots = R * int((seats == PROFILES.index(s.profile)).sum())

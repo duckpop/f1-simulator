@@ -45,5 +45,15 @@ def test_live_window_offscreen(tracks):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # no window on the screen
     cfg = tqc.TQCConfig(obs_dim=de.OBS, act_dim=de.ACTIONS, encoder=EncoderSpec(lidar_beams=50, conv=((4, 5, 5),), other_hidden=(8,)), actor_hidden=(8,), critic_hidden=(8,))
     actor = tqc.init(jax.random.PRNGKey(0), cfg).actor
-    rec, race = watch.live(tracks[0], actor, cfg, cars=3, laps=1, seconds=8.0, speed=8.0, save=True, close_when_done=True)
-    assert race.clock[0] >= 8.0 and len(rec.frames) > 30
+    rec, race = watch.live(tracks[0], actor, cfg, cars=3, laps=1, seconds=8.0, speed=8.0, save=True, close_when_done=True, labels=["Middle", "Aggressive", "Defensive"])
+    assert race.clock[0] >= 8.0 and len(rec.frames) > 30 and rec.labels[1] == "Aggressive"
+
+
+def test_record_mixed_profiles(tracks):
+    cfg = tqc.TQCConfig(obs_dim=de.OBS, act_dim=de.ACTIONS, encoder=EncoderSpec(lidar_beams=50, conv=((4, 5, 5),), other_hidden=(8,)), actor_hidden=(8,), critic_hidden=(8,))
+    actors = [tqc.init(jax.random.PRNGKey(k), cfg).actor for k in range(2)]
+    race = watch.Race(tracks[0], actors, cfg, cars=5, laps=1, respawn=False, seed=0)
+    assert race.seats == (0, 1, 0, 1, 0)  # car k drives actor k mod 2
+    labels = ["Middle", "Aggressive"] * 2 + ["Middle"]
+    rec, final = watch.record(tracks[0], actors, cfg, cars=5, laps=1, seconds=8.0, labels=labels)
+    assert final.clock[0] >= 8.0 and rec.replay()["labels"] == labels
