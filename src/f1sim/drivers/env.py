@@ -6,7 +6,8 @@
 - Every car gets random upgrade levels each race: each category 0-10, drawn per car.
 - The scripted training principal calls the pit stops (`f1sim.drivers.principal`); pace normal, no team orders, ERS
   "deploy".
-- Crashed cars rejoin from the pit exit after ~5 s (f1env's training respawn) and start a new episode.
+- A crashed car is out for the rest of its race (`respawn` false, since 2026-11-01: a crash isn't just a short setback);
+  with respawn on it rejoins from the pit exit after ~5 s (f1env's training respawn) as a new episode.
 - A race that's over, or past its time limit, restarts at once on a new track inside the same jitted step, so no batch
   slot waits.
 - Stage B: a share of the sessions (`quali_share`) are short qualifying sessions instead of races: every car in its
@@ -18,7 +19,7 @@ started, the car was running and not parked in its garage; the pit lane counts, 
 bootstraps) and the reward amounts per term (`f1sim.drivers.rewards`), before the profile's weights. A qualifying run ends when the
 car parks in its garage: that step's car isn't `valid` any more, so the replay doesn't bootstrap past it.
 
-    state, obs = reset(bank, key, cfg)                         # obs (R, C, 209)
+    state, obs = reset(bank, key, cfg)                         # obs (R, C, 234)
     state, obs, out, info = step(bank, state, action, key, cfg)  # action (R, C, 5) in [-1, 1]
     state, obs = from_race(bank, race_state, key, cfg)     # around a session f1env's F1Env started (evals)
 
@@ -43,7 +44,7 @@ from f1env.weekend import start_qualifying
 from ..replay import CONTINUE, CUT, TERMINAL
 from . import principal, rewards
 
-OBS = observe.size(observe.DRIVER_LAYOUT)  # 209
+OBS = observe.size(observe.DRIVER_LAYOUT)  # 234 (209 until 2026-11-05: the cars around and the safety car appended)
 ACTIONS = 5
 SLIPPING = 0.01  # wheelspin / lock-up beyond this (how far past the grip) counts as time slipping
 LIDAR_BEAMS = observe.DRIVER_LAYOUT["lidar_edge"]
@@ -57,7 +58,7 @@ class EnvConfig(NamedTuple):
     min_laps: int = 5
     race_km: float = 305.0  # the longest race
     pit_share: float = 0.5  # races long enough to need a pit stop on their first set
-    pit_km: float = 90.0  # ... which is more than this (mediums last ~100 km, boxed at ~10%)
+    pit_km: float = 180.0  # ... which is more than this (mediums last ~200 km, boxed at ~10%)
     fixed_laps: int = 0  # evals: every race this long (0: drawn)
     time_factor: float = 2.5  # a race is cut (and bootstrapped) at this x its lap-simulation time, plus a minute
     worn: tuple = (0.08, 0.12)  # the principal boxes each stint at a tyre life drawn from this range
@@ -94,6 +95,9 @@ class Out(NamedTuple):
     attack: jax.Array  # (R, C) under attack: a rival within 1 s behind
     lost: jax.Array  # (R, C) places lost on the track this step
     slipping: jax.Array  # (R, C) wheelspin or a lock-up
+    metres: jax.Array  # (R, C) progress along the centreline on the track (the progress term pays it against the pace)
+    wear: jax.Array  # (R, C) % of tyre life used (the tyre_wear term charges only what's beyond the rated wear)
+    crashed: jax.Array  # (R, C) a crash (the crash term weighs a contact crash by blame)
 
 
 def to_race_actions(a) -> RaceActions:
@@ -222,7 +226,7 @@ def restart_races(bank, s: EnvState, obs, mask, key, cfg: EnvConfig):
 
 def controlled(race):
     """(R, C) the driver drives (or the autopilot, in the pit lane, for a car still in the race)."""
-    return (race.status == RACING) & (race.clock >= 0)[:, None] & ~pt.parked(race.pits)
+    return (race.status == RACING) & (race.clock >= race.lights_out)[:, None] & ~pt.parked(race.pits)
 
 
 def race_done(bank, race, limit, cfg: EnvConfig):
@@ -255,7 +259,12 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
     new, ev = race_step(bank, race, acts, cfg.race)
     new = jax.tree.map(lambda a, b: a.astype(b.dtype), new, race)
     stopped = rewards.standing_still(new, cfg.race.blocked_gap, cfg.race.queue_speed)
-    amounts, mem = rewards.amounts(ev, acts, s.last, s.mem, valid, ev.respawned, quali=(is_q, race.best_lap, new.best_lap), stopped=stopped)
+    pace = jnp.maximum(jnp.minimum(bank.lap_speed[race.tid[:, None], race.idx], ev.sc_limit), 1.0)  # the reference pace
+    rated = jnp.maximum(ev.progress, 0.0) / (jnp.asarray(cfg.race.tyres.life_km)[race.tyres.compound] * 1000.0)
+    amounts, mem = rewards.amounts(
+        ev, acts, s.last, s.mem, valid, ev.respawned, quali=(is_q, race.best_lap, new.best_lap), stopped=stopped, pace=pace, rated_wear=rated,
+        sector_len=jnp.broadcast_to(bank.length[race.tid][:, None] / 3.0, valid.shape), close=rewards.too_close(new, ev.gap_ahead),
+    )
     terminal = valid & (ev.crashed | ev.finished | ev.black_flag)
     over = race_done(bank, new, s.limit, cfg)
     end = jnp.where(terminal, TERMINAL, jnp.where(valid & over[:, None], CUT, CONTINUE)).astype(jnp.int8)
@@ -285,11 +294,16 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
         "pit_stops": jnp.sum(valid & ev.pit_in),
         "dead_tyre": jnp.sum(valid & ev.tyre_dead),
         "races": jnp.sum(over & live),
+        "metres": jnp.sum(jnp.where(valid & ~ev.off_track, ev.progress, 0.0)),
+        "wear": jnp.sum(jnp.where(valid, ev.tyre_wear * 100.0, 0.0)),
     }
     info = {k: v.astype(jnp.float32) for k, v in info.items()}
     dyn = ev.dynamics
     slipping = (dyn.wheelspin > SLIPPING) | (dyn.lockup_front > SLIPPING) | (dyn.lockup_rear > SLIPPING)
-    out = Out(amounts, valid, end, valid & ev.lap_done, valid & ev.records.under_attack, jnp.where(valid, ev.records.lost, 0), valid & slipping)
+    out = Out(
+        amounts, valid, end, valid & ev.lap_done, valid & ev.records.under_attack, jnp.where(valid, ev.records.lost, 0), valid & slipping,
+        jnp.where(valid & ~ev.off_track, ev.progress, 0.0), jnp.where(valid, ev.tyre_wear * 100.0, 0.0), valid & ev.crashed,
+    )
     return (nxt, obs, out, info, ev) if events else (nxt, obs, out, info)
 
 

@@ -27,6 +27,9 @@ def test_attack_spells():
 
 def test_seats():
     assert np.bincount(season.seats_for()).tolist() == [6, 6, 5, 5]
+    ref = season.seats_for(4, reference=True)  # the odd cars the reference (one in every team), the even ones the profiles
+    assert (ref[1::2] == 4).all() and np.bincount(ref[0::2]).tolist() == [3, 3, 3, 2]
+    assert (season.seats_for(1, reference=True) == np.arange(22) % 2).all()
 
 
 def fake(**over):

@@ -5,7 +5,7 @@
     f1sim-train --profile middle --generate 4 --eval-tracks 2 --preset laptop     # no pool: a small smoke run
 
 Each width (~26 m, ~20 m, then the 12-15 m tracks) trains until the eval stops improving for `patience` evals once
-cars finish races (or `steps_per_width`); the replay buffer and the networks carry on to the next width. The eval runs on the eval tracks
+cars finish races (or `steps_per_width`; `--patience 0` runs every width its full steps); the replay buffer and the networks carry on to the next width. The eval runs on the eval tracks
 at the same width. Everything is written to runs/<profile>/stage-a/: log.jsonl (every chunk and eval), latest.npz,
 best-<width>.npz and best.npz (the best eval on the 12-15 m tracks).
 
@@ -23,6 +23,7 @@ from functools import partial
 from pathlib import Path
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.92")  # JAX stops at 75% of the GPU by default
 
 import jax
 import jax.numpy as jnp
@@ -81,6 +82,7 @@ def main(argv=None):
     ap.add_argument("--widths", help='override the curriculum, e.g. "normal" or "26,normal"')
     ap.add_argument("--steps", type=int, help="override steps_per_width (environment steps)")
     ap.add_argument("--eval-every", type=int, help="override eval_every (environment steps)")
+    ap.add_argument("--patience", type=int, help="override patience (evals without a better one before the next width; 0: never stop early)")
     ap.add_argument("--rotate-every", type=int, help="override rotate_every (environment steps; 0: keep one set of tracks)")
     ap.add_argument("--tracks-per-set", type=int, help="override tracks (two sets are on the GPU when rotating)")
     ap.add_argument("--replay", type=int, help="override replay (transitions)")
@@ -106,7 +108,7 @@ def main(argv=None):
     template = tqc.init(k_agent, s.tqc)
     init = a.init or (str(Path(a.out) / s.start_from / "stage-a" / "best.npz") if s.start_from else None)
     if init:
-        base, info = checkpoint.load(init, template)
+        base, info = checkpoint.load(init, template, s.tqc)
         agent = tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha)
         warmup = 0
         print(f"{s.profile}: starting from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)")
@@ -117,17 +119,18 @@ def main(argv=None):
     warmup_steps = warmup // slots  # random actions
     learn_from = max(int(sa["warmup"]) // slots, s.tqc.batch // slots + s.tqc.n_step + 1)  # a started profile drives its own policy meanwhile
     w = jnp.asarray(s.weights)
-    meta = {"profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "styles": s.styles, "drop": s.tqc.drop, "gamma": s.tqc.gamma, "target_entropy": s.tqc.target_entropy, "init": init}
+    meta = {"profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION, "styles": s.styles, "drop": s.tqc.drop, "gamma": s.tqc.gamma, "target_entropy": s.tqc.target_entropy, "init": init}
     print(f"{s.profile}: d={s.tqc.drop} ({s.tqc.drop * s.tqc.critics} of {s.tqc.critics * s.tqc.quantiles} atoms dropped)  H0={s.tqc.target_entropy}  gamma={s.tqc.gamma}  {p['races']} races x 1 car  replay {p['replay']:,}")
 
     steps = jnp.zeros((), jnp.int32)
     widths = a.widths.split(",") if a.widths else sa["widths"]
     normal_eval = eval_tracks(a.tracks, "normal", a.eval_tracks)
     # an earlier run's best (same eval) stays the bar, so a new run's first eval can't overwrite a better checkpoint
-    best_overall = checkpoint.best_bar(out / "best.npz", stage="A", eval_kind="alone", eval_laps=p["eval_laps"])
+    best_overall = checkpoint.best_bar(out / "best.npz", stage="A", eval_kind="alone", eval_laps=p["eval_laps"], eval_version=evaluate.EVAL_VERSION)
     if best_overall:
         print(f"best so far on the normal tracks: {evaluate.summary(best_overall)}")
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
+    patience = sa["patience"] if a.patience is None else a.patience
     stop = StopFlag()
     for i_width, width in enumerate(widths):
         if stop.asked:
@@ -154,7 +157,7 @@ def main(argv=None):
         next_rotate = start + rotate_every if rot.rotates and rotate_every else None
         best, stale = None, 0
         t_width = time.time()
-        while int(carry.steps) - start < budget and stale < sa["patience"] and not stop.asked:
+        while int(carry.steps) - start < budget and (patience == 0 or stale < patience) and not stop.asked:
             t0 = time.time()
             carry, (info, m) = chunk(carry, bank)
             jax.block_until_ready(carry.steps)
@@ -175,7 +178,7 @@ def main(argv=None):
                 print(f"  tracks: {rot.describe()}; {int(hit.sum())} races restarted", flush=True)
             if n >= next_eval:
                 next_eval += eval_every
-                r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], eval_seeds)
+                r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], eval_seeds, weights=s.weights)
                 log({"kind": "eval", "width": width, "env_steps": n, **r})
                 info_ckpt = {**meta, "width": width, "env_steps": n, "eval": r}
                 checkpoint.save(out / "latest.npz", carry.agent, info_ckpt)
@@ -188,7 +191,7 @@ def main(argv=None):
                         checkpoint.save(out / "best.npz", carry.agent, info_ckpt)
                 elif best["finish_rate"] > 0:  # "stops improving" only counts once cars finish races
                     stale += 1
-                note = "  (best)" if improved else (f"  (no better: {stale}/{sa['patience']})" if best["finish_rate"] > 0 else "  (no better; nothing finishes yet)")
+                note = "  (best)" if improved else (f"  (no better: {stale}/{patience or 'no limit'})" if best["finish_rate"] > 0 else "  (no better; nothing finishes yet)")
                 print(f"  eval at {width}: {evaluate.summary(r)}{note}", flush=True)
         agent, replay, key, steps = carry.agent, carry.replay, carry.key, carry.steps
         print(f"width {width} done: {int(steps) - start:,} steps in {(time.time() - t_width) / 60:.1f} min; best eval: {evaluate.summary(best) if best else 'none'}")

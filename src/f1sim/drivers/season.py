@@ -69,16 +69,21 @@ class Tally(NamedTuple):
     valid: jax.Array  # steps driven
     slipping: jax.Array  # steps in wheelspin or a lock-up
     attacks: Attacks
+    metres: jax.Array  # progress on the track
+    wear: jax.Array  # % of tyre life used
+    crashes: jax.Array
 
 
 def new_tally(r: int, c: int) -> Tally:
     z = jnp.zeros((r, c))
-    return Tally(jnp.zeros((r, c, len(TERMS))), z, z, z, Attacks(z > 0, z, z))
+    return Tally(jnp.zeros((r, c, len(TERMS))), z, z, z, Attacks(z > 0, z, z), z, z, z)
 
 
-def seats_for(profiles: int = len(PROFILES), cars: int = CARS) -> np.ndarray:
-    """Car k drives profile k mod 4: 6, 6, 5, 5 cars."""
-    return np.arange(cars) % profiles
+def seats_for(profiles: int = len(PROFILES), cars: int = CARS, reference: bool = False) -> np.ndarray:
+    """Car k drives profile k mod 4: 6, 6, 5, 5 cars. With a reference field the odd cars (one in every team) drive
+    the reference (seat `profiles`) and the even ones the profiles in turn (3, 3, 3, 2 cars for four)."""
+    k = np.arange(cars)
+    return np.where(k % 2 == 0, (k // 2) % profiles, profiles) if reference else k % profiles
 
 
 @lru_cache(maxsize=4)
@@ -95,7 +100,10 @@ def _runner(ecfg: de.EnvConfig, cfg: tqc.TQCConfig, steps: int, seats: tuple):
                 a = tqc.act(actors[p], cfg, obs[:, sl].reshape(-1, de.OBS), k, mean=True)
                 actions = actions.at[:, sl].set(a.reshape(ecfg.races, len(sl), de.ACTIONS))
             state, obs, out, _ = de.step(bank, state, actions, k, ecfg)
-            t = Tally(t.amounts + out.amounts, t.laps + out.lap_done, t.valid + out.valid, t.slipping + out.slipping, track_attacks(t.attacks, out.attack, out.lost))
+            t = Tally(
+                t.amounts + out.amounts, t.laps + out.lap_done, t.valid + out.valid, t.slipping + out.slipping, track_attacks(t.attacks, out.attack, out.lost),
+                t.metres + out.metres, t.wear + out.wear, t.crashes + out.crashed,
+            )
             return (state, obs, t), None
 
         (state, obs, tally), _ = jax.lax.scan(body, (state, obs, tally), jax.random.split(key, steps))
@@ -122,16 +130,23 @@ def run_session(env: F1Env, session, actors, cfg: tqc.TQCConfig, seats, ecfg: de
     return session, tally, steps
 
 
-def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000, log=print, label=None) -> dict:
+def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000, log=print, label=None, names=PROFILES, weights=None, reference=None) -> dict:
     """Full weekends (Q1, Q2, Q3 decide the grid, then the race) for R parallel seasons: calendar (R, rounds) eval
-    tracks of `env`, round k with f1env's eval key k; the four profiles' actors in seats_for()."""
+    tracks of `env`, round k with f1env's eval key k; the profiles' actors in seats_for(), `names` theirs in order.
+    weights: each profile's reward weights, for its reward per step (None: not measured). reference: an actor for a
+    fixed reference field in the odd cars (reported as "reference"), so points mean the same from eval to eval."""
     calendar = np.asarray(calendar)
     seasons, rounds = calendar.shape
-    seats = seats_for(len(actors))
-    s = env.reset_season(jax.random.PRNGKey(2026), calendar=calendar, profiles=np.tile(seats, (seasons, 1)))
+    actors, names = list(actors), tuple(names[: len(actors)])
+    seats = seats_for(len(actors), reference=reference is not None)
+    if reference is not None:
+        actors, names = actors + [reference], names + ("reference",)
+    weights = None if weights is None else list(weights) + [None] * (len(actors) - len(weights))
+    ids = np.array([PROFILES.index(n) if n in PROFILES else 0 for n in names])  # f1env's profile ids (the reference: Middle's)
+    s = env.reset_season(jax.random.PRNGKey(2026), calendar=calendar, profiles=np.tile(ids[seats], (seasons, 1)))
     ecfg = de.EnvConfig(races=seasons, cars=CARS, upgrades=False, auto_reset=False, quali=True, race=env.wcfg.race)
     keys = eval_keys()
-    total, out_lap1, grids = None, [], []
+    total, out_lap1, grids, scheduled = None, [], [], []
     for rnd in range(rounds):
         t0, n = time.time(), 0
         for i, kind in enumerate(("Q1", "Q2", "Q3", "race")):
@@ -145,13 +160,14 @@ def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000
                 laps = np.floor(np.asarray(st.line) / np.asarray(env.bank.length[st.tid])[:, None])
                 out_lap1.append(np.asarray(st.dnf) & (laps < 1))
                 grids.append(np.asarray(s.quali["grid"]))
+                scheduled.append(np.asarray(st.target_laps))
             s = env.end_session(s, session)
         h = s.history[-1]
         if log:
             where = label(rnd) if label else f"round {rnd + 1}"
-            winners = ", ".join(PROFILES[seats[w]] for w in np.argmin(h["place"], axis=-1))
+            winners = ", ".join(names[seats[w]] for w in np.argmin(h["place"], axis=-1))
             log(f"{where}: won by {winners}; finished {100 * np.mean(h['finished']):.0f}%  ({n:,} steps in {time.time() - t0:.0f} s)", flush=True)
-    return summarise(s, total, np.stack(out_lap1, axis=1), np.stack(grids, axis=1), seats, rounds)
+    return summarise(s, total, np.stack(out_lap1, axis=1), np.stack(grids, axis=1), seats, rounds, names, weights, np.stack(scheduled, axis=1))
 
 
 def season(tracks, actors, cfg: tqc.TQCConfig, seasons: int = 1, rounds: int = 24, race_km: float = 305.0, chunk: int = 2000, env: F1Env | None = None, log=print) -> dict:
@@ -167,37 +183,44 @@ def weekend_env(tracks, laps: int = 50) -> F1Env:
     return F1Env(tracks, WeekendConfig(race_laps=(laps, laps)))
 
 
-def eval_weekend(env: F1Env, actors, cfg: tqc.TQCConfig, seeds: int = 1, chunk: int = 2000, log=None) -> dict:
-    """Stage B's eval: one full weekend on every track of `env` (`seeds` times each, in parallel), the four profiles
-    racing each other. The per-profile results of `summarise` (points per race, finishes, out on lap 1, style)."""
+def eval_weekend(env: F1Env, actors, cfg: tqc.TQCConfig, seeds: int = 1, chunk: int = 2000, log=None, names=PROFILES, weights=None, reference=None) -> dict:
+    """Stage B's eval: one full weekend on every track of `env` (`seeds` times each, in parallel), the profiles
+    (`names`, one per actor) racing each other and, if given, a fixed reference field. The per-profile results of
+    `summarise` (points per race, distance, reward per step, finishes, out on lap 1, style)."""
     n = len(env.tracks)
-    return weekends(env, actors, cfg, np.tile(np.arange(n), seeds)[:, None], chunk, log, lambda rnd: f"eval weekend on {n} tracks")
+    return weekends(env, actors, cfg, np.tile(np.arange(n), seeds)[:, None], chunk, log, lambda rnd: f"eval weekend on {n} tracks", names, weights, reference)
 
 
-def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int) -> dict:
+def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int, names=PROFILES, weights=None, scheduled=None) -> dict:
     """Per profile, from the season's history (points, finishes, speed) and the races' tallies (out_lap1: (R, rounds,
-    C)). grids: (R, rounds, C) each car's grid slot."""
+    C)). grids: (R, rounds, C) each car's grid slot; names: the profiles in seat order; weights: their reward weights
+    (or None each); scheduled: (R, rounds) the race laps."""
     hist = {k: np.stack([h[k] for h in s.history], axis=1) for k in ("points", "finished", "speed", "dsq")}  # (R, rounds, C)
     t = {name: i for i, name in enumerate(TERMS)}
     amounts = np.asarray(total.amounts)
-    laps, valid, slipping = (np.asarray(x) for x in (total.laps, total.valid, total.slipping))
+    laps, valid, slipping, metres, worn, crashes = (np.asarray(x) for x in (total.laps, total.valid, total.slipping, total.metres, total.wear, total.crashes))
     att_count, att_lost = np.asarray(total.attacks.count), np.asarray(total.attacks.lost)
     champions = seats[s.standings.drivers()[:, 0]]
-    res = {"seasons": int(hist["points"].shape[0]), "rounds": rounds, "profiles": {}, "out_lap1_field": float(out_lap1.mean()), "champions": [PROFILES[c] for c in champions]}
-    for p, name in enumerate(PROFILES[: int(seats.max()) + 1]):
+    res = {"seasons": int(hist["points"].shape[0]), "rounds": rounds, "profiles": {}, "out_lap1_field": float(out_lap1.mean()), "champions": [names[c] for c in champions]}
+    for p, name in enumerate(names[: int(seats.max()) + 1]):
         sl = seats == p
         cars = int(sl.sum()) * hist["points"].shape[0]
         per_race = lambda x: float(x[..., sl].sum() / (cars * rounds))
         fin = hist["finished"][..., sl]
         speed = hist["speed"][..., sl]
-        km = amounts[:, sl, t["progress"]].sum() / 1000.0
-        wear = amounts[:, sl, t["tyre_wear"]].sum() / 100.0  # tyre sets' worth of life used
+        km = metres[:, sl].sum() / 1000.0
+        wear = worn[:, sl].sum() / 100.0  # tyre sets' worth of life used
+        w = None if weights is None else weights[p]
+        due = float(np.asarray(scheduled).sum() * sl.sum()) if scheduled is not None else 0.0
         res["profiles"][name] = {
+            "eval_version": evaluate.EVAL_VERSION,
             "points_per_race": per_race(hist["points"]),
+            "distance": min(float(laps[:, sl].sum()) / due, 1.0) if due else float("nan"),
+            "reward_per_step": float((amounts[:, sl].sum(axis=(0, 1)) @ np.asarray(w)) / max(valid[:, sl].sum(), 1.0)) if w is not None else float("nan"),
             "finish_rate": float(fin.mean()),
             "out_lap1": float(out_lap1[..., sl].mean()),
             "disqualified": float(hist["dsq"][..., sl].mean()),
-            "crashes_per_lap": float(amounts[:, sl, t["crash"]].sum() / max(laps[:, sl].sum(), 1.0)),
+            "crashes_per_lap": float(crashes[:, sl].sum() / max(laps[:, sl].sum(), 1.0)),
             "laps": float(laps[:, sl].sum()),
             "race_speed_kmh": float(speed[fin].mean()) if fin.any() else float("nan"),
             "overtakes_per_race": float(amounts[:, sl, t["overtake"]].sum() / (cars * rounds)),
@@ -300,7 +323,7 @@ def load_actors(root, stage: str = "b"):
             raise FileNotFoundError(f"no {' or '.join(stages)} best.npz for {p} under {root}")
         info = checkpoint.meta(path)
         s = load(p, info.get("preset", "laptop"))
-        agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc))
+        agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc), s.tqc)
         actors.append(agent.actor)
         sources[p] = str(path)
         cfg = cfg or s.tqc
@@ -328,7 +351,7 @@ def main(argv=None):
     if a.alone_laps:
         alone = {}
         for p, actor in zip(PROFILES, actors):
-            alone[p] = evaluate.alone(env.bank, actor, cfg, a.alone_laps)
+            alone[p] = evaluate.alone(env.bank, actor, cfg, a.alone_laps, weights=load(p).weights)
             print(f"alone {p:>10}: {evaluate.summary(alone[p])}", flush=True)
     sea = season(tracks, actors, cfg, a.seasons, a.rounds, a.race_km, env=env) if a.rounds else None
     settings = {"alone laps": a.alone_laps, "rounds": a.rounds, "seasons": a.seasons, "race km": a.race_km, "eval tracks": len(tracks)}

@@ -12,9 +12,9 @@ def events(gained=0, lost=0, place=5, progress=0.0, off=False):
     z = jnp.zeros((1, 1))
     i = lambda x: jnp.full((1, 1), x, jnp.int32)
     rec = SimpleNamespace(gained=i(gained), lost=i(lost), place=i(place), under_attack=z > 0, inside_line=z > 0)
-    dyn = SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z)
+    dyn = SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z, slide_front=z, slide_rear=z)
     return SimpleNamespace(
-        records=rec, dynamics=dyn, progress=z + progress, crashed=z > 0, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, respawned=z > 0,
+        records=rec, dynamics=dyn, progress=z + progress, crashed=z > 0, crash_blame=z, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, respawned=z > 0,
         off_track=jnp.full((1, 1), off),
     )
 
@@ -40,8 +40,8 @@ def test_qualifying_standing_and_laps():
     i = lambda x: jnp.full((1, 22), x, jnp.int32)
     ev = SimpleNamespace(
         records=SimpleNamespace(gained=i(0), lost=i(0), place=i(1), under_attack=z > 0, inside_line=z > 0),
-        dynamics=SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z),
-        progress=z, crashed=z > 0, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, off_track=z > 0,
+        dynamics=SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z, slide_front=z, slide_rear=z),
+        progress=z, crashed=z > 0, crash_blame=z, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, off_track=z > 0,
     )
     mem = rw.new_memory(jnp.ones((1, 22)))
     on = jnp.ones(1, bool)
@@ -93,8 +93,8 @@ def test_profile_weights_scale_style_terms_only():
     w = dict(zip(rw.TERMS, rw.weights(None, {"overtake": 2.0, "smoothness": 0.5})))
     assert w["overtake"] == 2 * rw.BASE["overtake"] and w["place_lost"] == rw.BASE["place_lost"]
     assert w["inputs"] == 0.5 * rw.BASE["inputs"] and w["slip"] == 0.5 * rw.BASE["slip"]
-    assert w["progress"] == rw.BASE["progress"] and w["crash"] == -70.0
-    assert np.isclose(rw.BASE["progress"] * 86.1 * 0.05, 1.0)  # a step at top speed is worth +1
+    assert w["progress"] == rw.BASE["progress"] and w["crash"] == -100.0
+    assert rw.BASE["progress"] == 1.0  # a step at reference pace is worth +1
 
 
 def test_no_progress_off_the_track():
@@ -102,8 +102,73 @@ def test_no_progress_off_the_track():
     mem = rw.new_memory(jnp.full((1, 1), 5))
     on, _ = rw.amounts(events(progress=4.0), a, a, mem, jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool))
     off, _ = rw.amounts(events(progress=4.0, off=True), a, a, mem, jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool))
-    assert float(on[0, 0, TERM["progress"]]) == 4.0 and float(on[0, 0, TERM["off_track"]]) == 0.0
+    assert np.isclose(float(on[0, 0, TERM["progress"]]), 4.0 / (86.1 * 0.05)) and float(on[0, 0, TERM["off_track"]]) == 0.0  # no pace: top speed
     assert float(off[0, 0, TERM["progress"]]) == 0.0 and np.isclose(float(off[0, 0, TERM["off_track"]]), 0.05)
     w = dict(zip(rw.TERMS, rw.weights()))
     assert w["off_track"] == -2.0  # common to every profile
     assert all(dict(zip(rw.TERMS, rw.weights(None, {s: 2.0 for s in rw.STYLES})))["off_track"] == -2.0 for _ in [0])
+
+
+def test_progress_against_the_reference_pace():
+    """A step at the reference pace (the lap simulation's speed there, or the limit) pays +1, wherever it is."""
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    mem = rw.new_memory(jnp.full((1, 1), 5))
+    on, f = jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool)
+    for v in (20.0, 43.0, 80.0):  # a hairpin, behind the safety car, a straight
+        out, _ = rw.amounts(events(progress=v * 0.05), a, a, mem, on, f, pace=jnp.full((1, 1), v))
+        assert np.isclose(float(out[0, 0, TERM["progress"]]), 1.0)
+    slow, _ = rw.amounts(events(progress=0.5 * 20.0 * 0.05), a, a, mem, on, f, pace=jnp.full((1, 1), 20.0))
+    assert np.isclose(float(slow[0, 0, TERM["progress"]]), 0.5)
+
+
+def test_tyre_wear_beyond_the_rated_wear():
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    mem = rw.new_memory(jnp.full((1, 1), 5))
+    on, f = jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool)
+    ev = events()
+    ev.tyre_wear = jnp.full((1, 1), 3e-5)
+    full, _ = rw.amounts(ev, a, a, mem, on, f)
+    beyond, _ = rw.amounts(ev, a, a, mem, on, f, rated_wear=jnp.full((1, 1), 1e-5))
+    under, _ = rw.amounts(ev, a, a, mem, on, f, rated_wear=jnp.full((1, 1), 5e-5))
+    assert np.isclose(float(full[0, 0, TERM["tyre_wear"]]), 3e-3) and np.isclose(float(beyond[0, 0, TERM["tyre_wear"]]), 2e-3)
+    assert float(under[0, 0, TERM["tyre_wear"]]) == 0.0  # gentler than rated: no cost (and no credit)
+
+
+def test_a_contact_crash_costs_by_blame():
+    """The car that drove into the other pays the full crash cost, the car it hit 30%; a crash alone the full cost."""
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    mem = rw.new_memory(jnp.full((1, 1), 5))
+    on, f = jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool)
+    for blame, cost in ((1.0, 1.0), (0.0, rw.CRASH_VICTIM), (0.5, 0.65)):
+        ev = events()
+        ev.crashed, ev.crash_blame = jnp.ones((1, 1), bool), jnp.full((1, 1), blame)
+        out, _ = rw.amounts(ev, a, a, mem, on, f)
+        assert np.isclose(float(out[0, 0, TERM["crash"]]), cost)
+
+
+def test_a_sector_for_each_third_of_a_lap_driven():
+    """+1 sector each time the car's own progress on the track this episode passes another third of a lap; going back
+    and forth doesn't pay twice, off-track progress doesn't count, a new episode starts again."""
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    mem = rw.new_memory(jnp.full((1, 1), 5))
+    on, f, third = jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool), jnp.full((1, 1), 1000.0)
+    paid = []
+    for metres, off in [(600.0, False), (600.0, False), (-300.0, False), (300.0, False), (900.0, True), (900.0, False)]:
+        out, mem = rw.amounts(events(progress=metres, off=off), a, a, mem, on, f, sector_len=third)
+        paid.append(int(out[0, 0, TERM["sector"]]))
+    assert paid == [0, 1, 0, 0, 0, 1]  # 600, 1200 (a third), 900, 1200 (already paid), off track, 2100 (the second)
+    out, mem = rw.amounts(events(progress=500.0), a, a, mem, on, jnp.ones((1, 1), bool), sector_len=third)
+    assert int(out[0, 0, TERM["sector"]]) == 0 and float(mem.driven[0, 0]) == 0.0  # respawned: a new episode
+
+
+def test_too_close_behind_under_the_safety_car():
+    """With the safety car out, under 0.5 s behind the car ahead costs per second; further back, or without it, not."""
+    from f1env import racecontrol as rc
+
+    speed = jnp.full((1, 3), 40.0)
+    for phase, want in ((rc.OUT, [True, False, False]), (rc.NONE, [False, False, False])):
+        race = SimpleNamespace(cars=SimpleNamespace(vx=speed, vy=jnp.zeros((1, 3))), sc=SimpleNamespace(phase=jnp.array([phase])))
+        assert list(np.asarray(rw.too_close(race, jnp.array([[10.0, 30.0, jnp.inf]]))[0])) == want  # 0.25 s, 0.75 s, nobody
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    out, _ = rw.amounts(events(), a, a, rw.new_memory(jnp.full((1, 1), 5)), jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool), close=jnp.ones((1, 1), bool))
+    assert np.isclose(float(out[0, 0, TERM["sc_close"]]), 0.05)

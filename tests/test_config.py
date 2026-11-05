@@ -8,7 +8,7 @@ from f1sim.drivers.config import CONFIGS, PROFILES, load
 def test_every_profile_loads(preset):
     for p in PROFILES:
         s = load(p, preset)
-        assert s.tqc.obs_dim == 209 and s.tqc.act_dim == 5 and s.tqc.critics * s.tqc.quantiles == 125
+        assert s.tqc.obs_dim == 234 and s.tqc.act_dim == 5 and s.tqc.critics * s.tqc.quantiles == 125
 
 
 def test_profiles_match_the_spec():
@@ -26,7 +26,8 @@ def test_profiles_match_the_spec():
 
 def test_a_profile_can_replace_base_values():
     crash = rewards.TERMS.index("crash")
-    assert {p: float(load(p).weights[crash]) for p in PROFILES} == {"middle": -70.0, "aggressive": -40.0, "smooth": -200.0, "defensive": -120.0}
+    assert {p: float(load(p).weights[crash]) for p in PROFILES} == {"middle": -100.0, "aggressive": -70.0, "smooth": -230.0, "defensive": -150.0}
+    assert not load("middle").env.race.respawn  # a crashed car is out for the rest of its race
 
 
 def test_unknown_reward_terms_are_refused(tmp_path):

@@ -9,21 +9,27 @@ from f1sim.drivers.config import load
 def test_alone_runs_every_race_to_its_end(bank):
     cfg = load("middle").tqc
     agent = tqc.init(jax.random.PRNGKey(0), cfg)  # untrained: it won't get far
-    r = evaluate.alone(bank, agent.actor, cfg, laps=1, chunk=1000)
-    assert r["races"] == 2 and 0.0 <= r["finish_rate"] <= 1.0
+    r = evaluate.alone(bank, agent.actor, cfg, laps=1, chunk=1000, weights=load("middle").weights)
+    assert r["races"] == 2 and 0.0 <= r["finish_rate"] <= 1.0 and 0.0 <= r["distance"] <= 1.0
     assert r["steps"] < 30_000  # stopped once both races were over (the time limit at the latest)
-    assert np.isfinite([r["crashes_per_lap"], r["lap_ratio"], r["laps_per_stint"]]).all()
+    assert np.isfinite([r["crashes_per_lap"], r["lap_ratio"], r["laps_per_stint"], r["reward_per_step"]]).all()
+    assert r["eval_version"] == evaluate.EVAL_VERSION
+    assert np.isnan(evaluate.alone(bank, agent.actor, cfg, laps=1, chunk=1000)["reward_per_step"])  # no weights: not measured
 
 
-def test_better_prefers_finishing_then_safety_then_pace():
-    a = {"finish_rate": 0.6, "laps": 40.0, "crashes_per_lap": 0.02, "lap_ratio": 1.4}
+def test_better_prefers_distance_then_the_profiles_reward():
+    a = {"eval_version": evaluate.EVAL_VERSION, "distance": 0.80, "reward_per_step": 0.50}
     assert evaluate.better(a, None)
-    assert evaluate.better(a, {**a, "finish_rate": 0.5})
-    assert evaluate.better(a, {**a, "crashes_per_lap": 0.03, "laps": 30.0})  # laps don't matter once cars finish
-    assert evaluate.better(a, {**a, "lap_ratio": 1.5}) and not evaluate.better(a, a)
+    assert evaluate.better(a, {**a, "distance": 0.75, "reward_per_step": 0.9})  # 5% more of the distance
+    assert not evaluate.better(a, {**a, "distance": 0.85, "reward_per_step": 0.1})
+    assert evaluate.better(a, {**a, "distance": 0.81, "reward_per_step": 0.45})  # within 2%: the reward decides
+    assert not evaluate.better(a, {**a, "distance": 0.79, "reward_per_step": 0.55}) and not evaluate.better(a, a)
+    assert evaluate.better(a, {"finish_rate": 1.0, "laps": 500.0, "crashes_per_lap": 0.0, "lap_ratio": 1.0})  # an older eval is no bar
 
 
-def test_before_anything_finishes_more_laps_is_better():
-    crawling = {"finish_rate": 0.0, "laps": 0.0, "crashes_per_lap": 0.0, "lap_ratio": 0.0}  # cut by the time limit
-    lapping = {"finish_rate": 0.0, "laps": 12.0, "crashes_per_lap": 0.5, "lap_ratio": 1.6}
-    assert evaluate.better(lapping, crawling) and not evaluate.better(crawling, lapping)
+def test_stage_b_prefers_points_against_the_reference_then_distance():
+    a = {"eval_version": evaluate.EVAL_VERSION, "points_per_race": 5.0, "distance": 0.8, "reward_per_step": 0.5}
+    assert evaluate.better_mixed(a, {**a, "points_per_race": 4.5, "distance": 0.95})
+    assert evaluate.better_mixed(a, {**a, "points_per_race": 5.05, "distance": 0.7})  # within 0.1 points: the distance
+    assert evaluate.better_mixed(a, {**a, "points_per_race": 4.95, "reward_per_step": 0.4}) and not evaluate.better_mixed(a, a)
+    assert evaluate.better_mixed(a, {"points_per_race": 9.0, "finish_rate": 1.0, "crashes_per_lap": 0.0})  # an older eval

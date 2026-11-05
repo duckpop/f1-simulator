@@ -342,7 +342,7 @@ def main(argv=None):
         path = Path(a.checkpoint) if a.checkpoint else newest_best(a.runs, p)
         info = checkpoint.meta(path)
         s = load(info.get("profile", p), info.get("preset", "laptop"))
-        agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc))
+        agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc), s.tqc)
         drivers.append((path, info, s, agent))
     path, info, s, _ = drivers[0]
     width = a.width or info.get("width", "normal")

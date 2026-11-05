@@ -3,11 +3,17 @@
     f1sim-train-b --tracks tracks --preset cluster                  # each profile from its stage A best
     f1sim-train-b --generate 4 --eval-tracks 2 --init-all runs/middle/stage-a/best.npz --steps 2000   # smoke run
     f1sim-train-b --tracks tracks --init smooth=runs/middle/stage-b/best.npz ...   # a profile from a given checkpoint
+    f1sim-train-b --tracks tracks --profiles middle --out runs/together --init middle=runs/middle/stage-a/best.npz
+                                                                    # one profile alone on the grid: 16 learning, 6 frozen
 
 - 22 cars per race on the 12-15 m tracks, with every rule f1env has: overtaking, dirty air, slipstream, DRS, contact,
   the safety car, blue flags. Seats are fixed by car number (the grid is random every race): `per_profile` cars of each
   profile learn (4 x 4 = 16), and the other 6 (27%) drive frozen snapshots of earlier checkpoints, so the four don't
   only learn to beat each other's current habits.
+- `--profiles` picks the profiles that learn (default all four); the 16 learning seats are split between them
+  (`--per-profile` overrides), so `--profiles middle` races 16 learning Middles against 6 frozen earlier ones.
+- Each profile's target entropy is `entropy_shift` (-1) lower than in stage A: less action noise, so training drives
+  closer to the noise-free eval (at stage A's noise tyres lasted half as long).
 - Each profile has its own networks, optimisers and replay buffer. One batch of races trains all four: each car's steps
   go to its profile's buffer, with its profile's reward weights, and every profile takes its gradient steps each
   environment step.
@@ -15,9 +21,12 @@
   current actor (in turn), replacing the oldest. A frozen car drives one snapshot (its mean action) for a whole
   session, drawn again when the session restarts.
 - 20% of sessions are short qualifying sessions (`quali_share`), so flying laps and the "session" input are learned.
-- The eval: a full weekend on every eval track (Q1, Q2 and Q3 set the grid, then a race of `eval_laps` laps), every
-  seat a learning profile (5-6 cars each), the default car, no respawn. Each profile keeps its best checkpoint (most
-  points per race, then finishes) in runs/<profile>/stage-b/.
+- The eval: a full weekend on every eval track (Q1, Q2 and Q3 set the grid, then a race of `eval_laps` laps), the
+  default car, no respawn: the even cars the learning profiles in turn, the odd ones (one in every team) a fixed
+  reference driver (`eval_reference`, or `--reference`), so points mean the same from eval to eval and a profile can't
+  look better because another got worse. Then each profile alone on the eval tracks for `solo_laps` laps: its pace,
+  tyre life and crashes apart from the field. Each profile keeps its best checkpoint (`evaluate.better_mixed`: points
+  against the reference, then the distance completed, then its own reward per step) in runs/<profile>/stage-b/.
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.92")  # JAX stops at 75% of the GPU by default
 
 import jax
 import jax.numpy as jnp
@@ -127,6 +137,7 @@ def make_chunk(cfgs, env_cfg: de.EnvConfig, seats: np.ndarray, weights: np.ndarr
             "amounts": jnp.einsum("rck,cg->gk", out.amounts, onehot),  # (groups, terms)
             "valid": jnp.einsum("rc,cg->g", out.valid.astype(jnp.float32), onehot),
             "laps": jnp.einsum("rc,cg->g", out.lap_done.astype(jnp.float32), onehot),
+            "crashes": jnp.einsum("rc,cg->g", out.crashed.astype(jnp.float32), onehot),
             "reward": jnp.einsum("rc,cg->g", reward, onehot),
             "races": info["races"],
         }
@@ -151,6 +162,7 @@ def chunk_record(stats, metrics, profiles, elapsed: float, steps: int) -> dict:
     amounts = np.asarray(stats["amounts"]).sum(axis=0)  # (groups, terms)
     valid = np.asarray(stats["valid"]).sum(axis=0)
     laps = np.asarray(stats["laps"]).sum(axis=0)
+    crashes = np.asarray(stats["crashes"]).sum(axis=0)
     reward = np.asarray(stats["reward"]).sum(axis=0)
     learning = np.asarray(metrics["learning"]) > 0
     t = {name: i for i, name in enumerate(rewards.TERMS)}
@@ -160,8 +172,8 @@ def chunk_record(stats, metrics, profiles, elapsed: float, steps: int) -> dict:
         r = {
             "transitions": float(valid[g]),
             "laps": float(laps[g]),
-            "crashes": float(amounts[g, t["crash"]]),
-            "crashes_per_lap": float(amounts[g, t["crash"]] / max(laps[g], 1.0)),
+            "crashes": float(crashes[g]),
+            "crashes_per_lap": float(crashes[g] / max(laps[g], 1.0)),
             "overtakes": float(amounts[g, t["overtake"]]),
             "places_lost": float(amounts[g, t["place_lost"]]),
             "holding_s": float(amounts[g, t["holding"]]),
@@ -190,46 +202,56 @@ def main(argv=None):
     ap.add_argument("--rotate-every", type=int, help="override rotate_every (environment steps; 0: keep one set of tracks)")
     ap.add_argument("--tracks-per-set", type=int, help="override tracks (two sets are on the GPU when rotating)")
     ap.add_argument("--replay", type=int, help="override replay_b (transitions per profile)")
+    ap.add_argument("--profiles", default=",".join(PROFILES), help="the profiles that learn, comma-separated (default: all four)")
+    ap.add_argument("--per-profile", type=int, help="learning cars per profile (default: 16 learning seats split between the profiles)")
+    ap.add_argument("--reference", help='the eval\'s fixed reference driver (default: eval_reference in the config; "none": no reference field)')
     ap.add_argument("--out", default="runs")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
     if a.tracks is None and not a.generate:
         ap.error("give a track pool (--tracks) or --generate N")
+    names = tuple(a.profiles.split(","))
+    if set(names) - set(PROFILES) or len(set(names)) != len(names):
+        ap.error(f"--profiles takes some of {', '.join(PROFILES)}, each once: {a.profiles}")
     inits = dict(x.split("=", 1) for x in a.init if "=" in x)
-    if len(inits) != len(a.init) or set(inits) - set(PROFILES):
-        ap.error(f"--init takes PROFILE=PATH, once per profile ({', '.join(PROFILES)}): {' '.join(a.init)}")
+    if len(inits) != len(a.init) or set(inits) - set(names):
+        ap.error(f"--init takes PROFILE=PATH, once per profile ({', '.join(names)}): {' '.join(a.init)}")
 
-    settings = [load(p, a.preset) for p in PROFILES]
+    settings = [load(p, a.preset) for p in names]
     s0 = settings[0]
     p, sb = s0.preset, s0.stage_b
     p.update({k: v for k, v in (("tracks", a.tracks_per_set), ("replay_b", a.replay)) if v})
-    cfgs = [s.tqc for s in settings]
-    seats = seat_layout(CARS, sb["per_profile"])
+    cfgs = [s.tqc._replace(target_entropy=s.tqc.target_entropy + sb.get("entropy_shift", 0.0)) for s in settings]  # less noise
+    per = a.per_profile or sb["per_profile"] * len(PROFILES) // len(names)
+    seats = seat_layout(CARS, per, len(names))
     env_cfg = s0.env._replace(races=p["races_b"], cars=CARS, quali_share=sb["quali_share"], quali_s=sb["quali_s"])
     R = env_cfg.races
 
     key = jax.random.PRNGKey(a.seed)
-    agents, replays = [], []
-    for s in settings:
+    agents, replays, done = [], [], 0
+    for i, s in enumerate(settings):
         template = tqc.init(jax.random.PRNGKey(0), s.tqc)
         init = init_path(s.profile, a.out, inits, a.resume, a.init_all)
-        base, info = checkpoint.load(init, template)
-        agents.append(tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha))
-        slots = R * int((seats == PROFILES.index(s.profile)).sum())
+        base, info = checkpoint.load(init, template, s.tqc)
+        done += info.get("env_steps", 0)
+        agents.append(tqc.from_networks(cfgs[i], base.actor, base.critic, base.target, base.log_alpha))
+        slots = R * int((seats == i).sum())
         replays.append(rp.new(rp.rows_for(p.get("replay_b", p["replay"]), slots), slots, de.OBS, de.ACTIONS))
-        print(f"{s.profile:>10}: from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)  d={s.tqc.drop} H0={s.tqc.target_entropy} gamma={s.tqc.gamma}")
+        print(f"{s.profile:>10}: from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)  d={s.tqc.drop} H0={cfgs[i].target_entropy} gamma={s.tqc.gamma}")
     K = sb["snapshots"]
     pool = stack([agents[k % len(agents)].actor for k in range(K)])
     n_frozen = int((seats < 0).sum())
-    print(f"{R} races x {CARS} cars: {sb['per_profile']} per profile learning, {n_frozen} frozen ({K} snapshots); {100 * sb['quali_share']:.0f}% qualifying")
+    print(f"{R} races x {CARS} cars: {per} per profile learning, {n_frozen} frozen ({K} snapshots); {100 * sb['quali_share']:.0f}% qualifying")
 
-    rot = Rotation(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed, generate=bool(a.generate))
+    # the starting checkpoints' steps in the seed: a run continued from another takes the pool in a new order, not
+    # the same first sets again
+    rot = Rotation(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed + done, generate=bool(a.generate))
     bank = rot.bank
     eval_env = season.weekend_env(eval_tracks(a.tracks, "normal", a.eval_tracks), p["eval_laps"])  # Q1-Q3, then the race
     key, k_reset, k_pool = jax.random.split(key, 3)
     env_state, obs = de.compiled("reset", env_cfg)(bank, k_reset, pick=rot.pick)
     league = League(env_state, obs, tuple(agents), tuple(replays), pool, jax.random.randint(k_pool, (R, n_frozen), 0, K), key, jnp.zeros((), jnp.int32))
-    learn_from = max(int(sb["warmup"]) // (R * sb["per_profile"]), s0.tqc.batch // (R * sb["per_profile"]) + s0.tqc.n_step + 1)
+    learn_from = max(int(sb["warmup"]) // (R * per), s0.tqc.batch // (R * per) + s0.tqc.n_step + 1)
     weights = np.stack([s.weights for s in settings])
     chunk = make_chunk(cfgs, env_cfg, seats, weights, p["chunk"], p["updates"], learn_from)
 
@@ -244,7 +266,17 @@ def main(argv=None):
     next_rotate = rotate_every if rot.rotates and rotate_every else None
     print(f"training tracks: {rot.describe()}")
     # an earlier run's best (same eval) stays the bar, so a new run's first eval can't overwrite a better checkpoint
-    eval_meta = {"stage": "B", "eval_kind": "weekend", "eval_laps": p["eval_laps"]}
+    eval_meta = {"stage": "B", "eval_kind": "weekend", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION}
+    ref_path = a.reference or sb.get("eval_reference")
+    reference = None
+    if ref_path and ref_path != "none":
+        if Path(ref_path).exists():
+            reference = checkpoint.load(ref_path, tqc.init(jax.random.PRNGKey(0), s0.tqc), s0.tqc)[0].actor
+            print(f"eval reference field: {ref_path} ({checkpoint.meta(ref_path).get('env_steps', 0):,} steps)")
+        else:
+            print(f"eval reference {ref_path} not found: the eval races the profiles only")
+    eval_meta["eval_reference"] = ref_path if reference is not None else None
+    weights_of = [s.weights for s in settings]
     best: dict[str, dict | None] = {s.profile: checkpoint.best_bar(outs[s.profile] / "best.npz", **eval_meta) for s in settings}
     for name, bar in best.items():
         if bar:
@@ -256,7 +288,7 @@ def main(argv=None):
         league, (stats, metrics) = chunk(league, bank)
         jax.block_until_ready(league.steps)
         n = int(league.steps)
-        rec = chunk_record(stats, metrics, PROFILES, time.time() - t0, p["chunk"])
+        rec = chunk_record(stats, metrics, names, time.time() - t0, p["chunk"])
         log_file.write(json.dumps({"kind": "chunk", "env_steps": n, **rec}) + "\n")
         log_file.flush()
         parts = []
@@ -273,14 +305,18 @@ def main(argv=None):
         if n >= next_snap:  # a copy of one profile's actor into the pool, replacing the oldest
             next_snap += snap_every
             league = push_snapshot(league, slot, league.agents[turn].actor)
-            slot, turn = (slot + 1) % K, (turn + 1) % len(PROFILES)
+            slot, turn = (slot + 1) % K, (turn + 1) % len(names)
         if n >= next_eval:
             next_eval += eval_every
-            res = season.eval_weekend(eval_env, [ag.actor for ag in league.agents], cfgs[0], p["eval_seeds"], log=print)
+            res = season.eval_weekend(eval_env, [ag.actor for ag in league.agents], cfgs[0], p["eval_seeds"], log=print, names=names, weights=weights_of, reference=reference)
+            res["solo"] = {s.profile: evaluate.alone(eval_env.bank, ag.actor, cfgs[i], sb.get("solo_laps", 5), weights=s.weights) for i, (s, ag) in enumerate(zip(settings, league.agents))}
+            if "reference" in res["profiles"]:
+                print(f"  eval  reference: {evaluate.summary_mixed(res['profiles']['reference'])}", flush=True)
             log_file.write(json.dumps({"kind": "eval", "env_steps": n, **res}) + "\n")
             log_file.flush()
             for s, ag in zip(settings, league.agents):
                 r = res["profiles"][s.profile]
+                r = {**r, "solo": res["solo"][s.profile]}
                 meta = {"profile": s.profile, "preset": a.preset, **eval_meta, "env_steps": n, "eval": r}
                 checkpoint.save(outs[s.profile] / "latest.npz", ag, meta)
                 improved = evaluate.better_mixed(r, best[s.profile])
@@ -288,6 +324,7 @@ def main(argv=None):
                     best[s.profile] = r
                     checkpoint.save(outs[s.profile] / "best.npz", ag, meta)
                 print(f"  eval {s.profile:>10}: {evaluate.summary_mixed(r)}{'  (best)' if improved else ''}", flush=True)
+                print(f"  solo {s.profile:>10}: {evaluate.summary(r['solo'])}", flush=True)
     for s, ag in zip(settings, league.agents):
         checkpoint.save(outs[s.profile] / "latest.npz", ag, {"profile": s.profile, "preset": a.preset, "stage": "B", "env_steps": int(league.steps)})
     print(f"stage B: {int(league.steps):,} steps in {(time.time() - t_start) / 60:.1f} min")

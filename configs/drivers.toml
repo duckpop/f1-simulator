@@ -8,8 +8,8 @@ lr = 3e-4                   # actor, critics and alpha
 batch = 256
 tau = 0.005
 n_step = 5
-actor_hidden = [256, 256]
-critic_hidden = [512, 512, 512]
+actor_hidden = [256, 256, 256]          # one more layer each since 2026-11-05 (older checkpoints load deepened:
+critic_hidden = [512, 512, 512, 512]    # identity layers, the same driver)
 init_alpha = 1.0
 
 [encoder]                   # every network's input branches (f1sim.nets.EncoderSpec)
@@ -17,8 +17,10 @@ conv = [[32, 5, 2], [64, 3, 2]]    # lidar: (filters, width, stride) along the 5
 other_hidden = [128]               # the other ~59 inputs
 
 [rewards]                   # base values per unit (f1sim.drivers.rewards); profiles multiply the style terms
-progress = 0.23229          # per metre on the track: +1 for a step at top speed (86.1 m/s x 0.05 s), as v2
-crash = -70.0
+progress = 1.0              # per step's worth of reference pace (the lap simulation's speed there, or the limit)
+crash = -100.0              # (was -70; every profile's 30 more since 2026-11-01)
+sector = 10.0               # each third of a lap driven on the track, once
+sc_close = -5.0             # per second closer than 0.5 s behind the car ahead with the safety car called or out
 warning = -50.0
 bump = -2.0
 pit = 5.0                   # entering the pit lane on a call
@@ -29,9 +31,10 @@ overtake = 20.0             # per place, held 2 s
 place_lost = -25.0          # per place (was -20)
 holding = 1.0               # per second, under attack
 inside_line = 2.0           # per second
-tyre_wear = -10.0           # per % of tyre life
+tyre_wear = -10.0           # per % of tyre life beyond the compound's rated wear
 inputs = -0.05              # per unit of steer + throttle + brake change in a step
-slip = -0.2                 # per unit of wheelspin + lock-up in a step
+slip = -0.5                 # per unit of wheelspin + lock-up + sliding past the tyres' peak in a step (was -0.2,
+                            # without sliding: the trained drivers drifted, the rear past its peak 19% of cornering)
 quali_place = 1.0           # qualifying, per standing point: 21 for P1 down to 0 for P22, paid as the standing changes
 quali_q2 = 3.0              # qualifying: in the top 16 (would move on to Q2)
 quali_q3 = 5.0              # qualifying: in the top 10 (would move on to Q3)
@@ -42,9 +45,11 @@ standstill = -20.0          # per second stopped (under 1 m/s) on the track, unl
 min_laps = 5
 race_km = 305.0
 pit_share = 0.5             # at least half the races need a pit stop
-pit_km = 90.0
+pit_km = 180.0              # a first set can't do more (mediums 200 km nominal, boxed at ~10%)
 time_factor = 2.5           # a race is cut at this x its lap-simulation time (bootstrapped)
 worn = [0.08, 0.12]         # the principal boxes each stint at this tyre life
+respawn = false             # a crashed car is out for the rest of its race (true: it rejoins from the pit exit after
+                            # ~5 s as a new episode); off since 2026-11-01, so a crash isn't just a short setback
 
 [stage_a]                   # alone, one car per race, on the track-width curriculum
 widths = ["26", "20", "normal"]    # m; "normal" is the 12-15 m tracks
@@ -58,11 +63,16 @@ snapshot_every = 100_000    # environment steps between copies of a profile's ac
 quali_share = 0.2           # sessions that are short qualifying sessions
 quali_s = 720.0             # their length (Q3's 12 minutes), two runs each
 warmup = 10_000             # transitions per profile before the first update
+eval_reference = "runs/reference/middle-together-250k.npz"   # the eval's fixed field in the odd cars ("none": off): a
+                            # driver that has raced in traffic (stage A's best crashed on lap 1 in 89-98% of its cars)
+solo_laps = 5               # each eval also runs every profile alone on the eval tracks for this many laps
+entropy_shift = -1.0        # each profile's target entropy (H0) in stage B is this much lower: less action noise, so
+                            # training drives closer to the noise-free eval (noise cut tyre life by half, 59 -> 28 km)
 
-[preset.laptop]             # RTX 3050 Ti, 4 GB: debugging and small runs
+[preset.laptop]             # RTX 3050 Ti, 4 GB (the trainers let JAX use 92%, ~3.4 GB): stage A peaks at ~2.8 GB in use
 races = 64                  # stage A: one car per race; a step costs about the same for 8 or 256 races
-replay = 1_000_000          # transitions (~0.43 KB each)
-tracks = 16                 # training tracks in a set; two sets on the GPU (~14 MB a track)
+replay = 2_000_000          # transitions (~0.43 KB each)
+tracks = 20                 # training tracks in a set; two sets on the GPU (~24 MB a track); 32 ran out after an hour
 rotate_every = 100_000      # environment steps between fresh sets of tracks, so a run works through the pool
 chunk = 500                 # environment steps per jitted call
 updates = 1                 # gradient steps per environment step
@@ -72,7 +82,7 @@ eval_laps = 50              # every eval race
 eval_seeds = 1
 steps_per_width = 400_000   # at most, environment steps
 races_b = 16                # stage B: races per batch (x 22 cars), 64 learning cars per profile
-replay_b = 250_000          # stage B: per profile (four of them)
+replay_b = 500_000          # stage B: per profile (four of them)
 steps_b = 200_000
 
 [preset.cluster]            # the real runs

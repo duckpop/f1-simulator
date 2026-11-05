@@ -74,7 +74,7 @@ def widened(tracks, width):
 
 # ---- track rotation -----------------------------------------------------------------------------------------------
 
-LINE_FIELDS = ("line_x", "line_y", "line_heading", "half_left", "half_right", "sc_speed", "section", "next_turn", "to_brake")  # (T, samples)
+LINE_FIELDS = ("line_x", "line_y", "line_heading", "half_left", "half_right", "sc_speed", "lap_speed", "section", "next_turn", "to_brake")  # (T, samples)
 FIELD_GRIDS = ("edge", "barrier", "surface")  # every track's grid, joined
 
 
@@ -106,7 +106,8 @@ class Rotation:
     """Training tracks for one width, on the GPU in two halves of n tracks: new races draw from the active half. Every
     rotation the other half gets a fresh set and becomes active; the half it replaces was active one rotation ago, so
     every race gets at least a full interval to finish, and only races still on it then are restarted. The pool is
-    shuffled once and taken in blocks, so every track comes round before any comes back.
+    shuffled and taken in blocks, so every track comes round before any comes back; then it's reshuffled for the next
+    pass, for as long as the run lasts. The seed sets the order: a run continued from another should use a new one.
 
     Without a pool (generated tracks), or with a pool no bigger than n, there's one fixed set and no rotation."""
 
@@ -131,6 +132,7 @@ class Rotation:
             self.rng = np.random.default_rng(seed)
             self.order, self.taken = [], 0
             self.seen = set()
+            self.passes, self.this_pass = 0, set()
             self.halves = [self._take(), self._take()] if self.rotates else [self._take()]
             if log:
                 log(f"{len(self.files)} training tracks at width {width}: {self.n} at a time" + (f", {2 * self.n} on the GPU (rotating)" if self.rotates else ""))
@@ -144,8 +146,10 @@ class Rotation:
         while len(out) < self.n:
             if not self.order:
                 self.order = list(self.rng.permutation(len(self.files)))
+                self.passes, self.this_pass = self.passes + 1, set()
             i = self.order.pop()
             self.seen.add(i)
+            self.this_pass.add(i)
             out.append(load_track(self.files[i]))
         return out
 
@@ -180,7 +184,7 @@ class Rotation:
     def describe(self) -> str:
         if not self.rotates:
             return f"{self.n} tracks (fixed)"
-        return f"set {self.rotations + 1}: {len(self.seen)} of {len(self.files)} tracks used so far"
+        return f"set {self.rotations + 1}, pass {self.passes} through the pool: {len(self.this_pass)} of {len(self.files)} tracks"
 
 
 

@@ -72,5 +72,14 @@ def test_eval_weekend(tracks):
     for p in r["profiles"].values():
         assert 0 <= p["finish_rate"] <= 1 and 0 <= p["out_lap1"] <= 1 and p["points_per_race"] >= 0
     assert sum(r["profiles"][p]["mean_grid_slot"] * n for p, n in zip(r["profiles"], (6, 6, 5, 5))) == pytest.approx(sum(range(1, 23)))  # the grid is qualifying's
-    assert evaluate.better_mixed({"points_per_race": 3.0, "finish_rate": 0.5, "crashes_per_lap": 0.1}, {"points_per_race": 2.0, "finish_rate": 0.9, "crashes_per_lap": 0.0})
     print(evaluate.summary_mixed(r["profiles"]["middle"]))
+    # with a reference field in the odd cars and the profiles' weights
+    ref = tqc.init(jax.random.PRNGKey(9), tiny(2)).actor
+    from f1sim.drivers.config import load
+
+    w = [load(p).weights for p in ("middle", "aggressive", "smooth", "defensive")]
+    r = season.eval_weekend(env, actors, tiny(2), weights=w, reference=ref)
+    assert set(r["profiles"]) == {"middle", "aggressive", "smooth", "defensive", "reference"}
+    for p in r["profiles"].values():
+        assert 0 <= p["distance"] <= 1 and p["eval_version"] == evaluate.EVAL_VERSION
+    assert np.isnan(r["profiles"]["reference"]["reward_per_step"]) and np.isfinite(r["profiles"]["middle"]["reward_per_step"])

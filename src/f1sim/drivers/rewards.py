@@ -6,8 +6,10 @@ The amounts are kept per term so each one's share of a profile's reward can be l
 
 | Term | Amount per step | Base | Style |
 |---|---|---|---|
-| progress | metres along the centreline, while the car's centre is on the track | +1 for a step at top speed (as v2) | common |
-| crash | crashes (ends the episode) | -70 | common |
+| progress | steps' worth of reference pace: metres along the centreline / (the lap simulation's speed there, or the speed limit if lower, x 0.05 s), while the car's centre is on the track | +1 (a step at reference pace) | common |
+| crash | crashes (ends the car's race: no respawn), a contact crash by blame: 0.3 + 0.7 x the car's share of it (f1env: by how fast each car moved towards the other) | -100 | common |
+| sector | each third of a lap driven on the track this race (paid once per third, so going back and forth doesn't farm it) | +10 | common |
+| sc_close | seconds closer than 0.5 s behind the car ahead while the safety car is called or out (queues that squeeze up end in chains of rear-ends) | -5 | common |
 | warning | warnings (the 4th is a black flag, which ends it) | -50 | common |
 | bump | contacts under 20 km/h | -2 | common |
 | pit | entering the pit lane on a call | +5 | common |
@@ -19,9 +21,9 @@ The amounts are kept per term so each one's share of a profile's reward can be l
 | place_lost | places lost on the track | -25 | place_lost |
 | holding | seconds keeping the place with a rival within 1 s behind | +1 | holding |
 | inside_line | seconds on the inside of the next corner, rival within 1 s behind, before the braking point | +2 | inside_line |
-| tyre_wear | % of tyre life used | -10 | tyre_wear |
+| tyre_wear | % of tyre life used beyond the compound's rated wear for the distance | -10 | tyre_wear |
 | inputs | change of steer + throttle + brake | -0.05 | smoothness |
-| slip | wheelspin + lock-ups (how far past the grip) | -0.2 | smoothness |
+| slip | wheelspin + lock-ups (how far past the grip) + sliding (how far each axle is past its tyres' peak slip angle) | -0.5 | smoothness |
 | quali_place | qualifying: change in standing points, 21 for P1 down to 0 for P22 (no time: 0) | +1 | common |
 | quali_q2 | qualifying: getting into (+1) or dropping out of (-1) the top 16, the places that move on to Q2 | +3 | common |
 | quali_q3 | qualifying: the same for the top 10, the places that move on to Q3 | +5 | common |
@@ -39,6 +41,17 @@ Standing still costs at once: drivers learned to wait in the pack at a race star
 cars around them had gone, which the stuck rule only punishes after 6 s. A car queuing behind a moving car (within 30 m,
 over 1 m/s: f1env's stuck-rule queue), in the pit lane or held at the lights isn't charged.
 
+Progress is paid against the reference pace at that point, the lap simulation's speed (the safety car's limit when
+it's lower), so a step at reference pace pays +1 in a hairpin, on a straight or behind the safety car alike: the reward
+measures how well a car drives where it is, and a safety car period isn't a stretch of low reward the driver can't
+change. (Until 2026-10-31 it paid per metre, +1 for a step at the 310 km/h top speed: ~0.6 on a clean lap, ~0.4 behind
+the safety car.) Tyre wear is charged only beyond what the compound's rated life allows for the distance, so the cost
+is for wearing tyres harder than nominal, not a tax on every metre.
+
+A contact crash costs each car by its share of the blame (f1env's, from how fast each car moved towards the other at
+contact): the car that drove into the other, or into a wreck, pays the full cost; the car it hit 30%. Both lose their
+episode, but the one hit couldn't have learned much from the full cost. Crashes with no other car pay the full cost.
+
 f1env has no track limits (run-off only has less grip), and progress is measured along the centreline, so a driver can
 gain by cutting a corner across the run-off; Middle learned to cut the inside of esses. So progress made with the car's
 centre off the track doesn't count (cutting 60 m at speed forfeits ~14, worth far more than the time it saves), and
@@ -52,13 +65,15 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
-TERMS = ("progress", "crash", "warning", "bump", "pit", "dead_tyre", "finish", "off_track", "overtake", "place_lost", "holding", "inside_line", "tyre_wear", "inputs", "slip", "quali_place", "quali_q2", "quali_q3", "quali_lap", "standstill")
+TOP_SPEED = 86.1  # m/s, the stock car's (310 km/h)
+CRASH_VICTIM = 0.3  # a car hit by another pays this share of the crash cost; the rest goes by its share of the blame
+TERMS = ("progress", "crash", "warning", "bump", "pit", "dead_tyre", "finish", "off_track", "overtake", "place_lost", "holding", "inside_line", "tyre_wear", "inputs", "slip", "quali_place", "quali_q2", "quali_q3", "quali_lap", "standstill", "sector", "sc_close")
 STYLE = {"overtake": "overtake", "place_lost": "place_lost", "holding": "holding", "inside_line": "inside_line", "tyre_wear": "tyre_wear", "inputs": "smoothness", "slip": "smoothness"}
 STYLES = ("overtake", "place_lost", "holding", "inside_line", "tyre_wear", "smoothness")
 
 BASE = {
-    "progress": 1.0 / (86.1 * 0.05),
-    "crash": -70.0,
+    "progress": 1.0,
+    "crash": -100.0,
     "warning": -50.0,
     "bump": -2.0,
     "pit": 5.0,
@@ -71,12 +86,14 @@ BASE = {
     "inside_line": 2.0,
     "tyre_wear": -10.0,
     "inputs": -0.05,
-    "slip": -0.2,
+    "slip": -0.5,
     "quali_place": 1.0,
     "quali_q2": 3.0,
     "quali_q3": 5.0,
     "quali_lap": 3.0,
     "standstill": -20.0,
+    "sector": 10.0,
+    "sc_close": -5.0,
 }
 HOLD_S = 2.0  # an overtake counts once the place has been held this long
 STOPPED_SPEED = 1.0  # m/s: slower than this counts as standing still
@@ -115,11 +132,13 @@ class Memory(NamedTuple):
     pending: jnp.ndarray  # (R, C) places gained, waiting to be held for HOLD_S
     timer: jnp.ndarray  # (R, C) steps left until they're paid
     best: jnp.ndarray  # (R, C) the best place an overtake has been paid for this episode
+    driven: jnp.ndarray  # (R, C) m of progress on the track this episode (the sector term)
+    sectors: jnp.ndarray  # (R, C) thirds of a lap paid this episode
 
 
 def new_memory(place):
     place = jnp.asarray(place, jnp.int32)
-    return Memory(jnp.zeros_like(place), jnp.zeros_like(place), place)
+    return Memory(jnp.zeros_like(place), jnp.zeros_like(place), place, jnp.zeros(place.shape, jnp.float32), jnp.zeros_like(place))
 
 
 def weights(base: dict | None = None, styles: dict | None = None) -> np.ndarray:
@@ -129,15 +148,31 @@ def weights(base: dict | None = None, styles: dict | None = None) -> np.ndarray:
     return np.array([base[t] * styles.get(STYLE[t], 1.0) if t in STYLE else base[t] for t in TERMS], np.float32)
 
 
-def _bits(x, n: int = 3):
+def _bits(x, n: int = 4):
     return sum((x >> k) & 1 for k in range(n))
 
 
-def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: float = 0.05, quali=None, stopped=None):
+SC_GAP_S = 0.5  # under the safety car, closer than this (s at the car's speed) behind the car ahead is too close
+
+
+def too_close(race, gap_ahead):
+    """(R, C) with the safety car called, out or just in (to the restart), the gap to the car ahead in the path is under
+    SC_GAP_S at the car's speed (moving at over 10 m/s)."""
+    from f1env import racecontrol as rc
+
+    speed = jnp.hypot(race.cars.vx, race.cars.vy)
+    period = (race.sc.phase != rc.NONE) & (race.sc.phase != rc.RED)
+    return period[:, None] & (speed > 10.0) & (gap_ahead < SC_GAP_S * speed)
+
+
+def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: float = 0.05, quali=None, stopped=None, pace=None, rated_wear=None, sector_len=None, close=None):
     """(R, C, terms) the amount of each term this step for cars the driver controlled before it, and the new memory.
     actions / last_actions: f1env RaceActions sent this step and the one before. quali: (is_qualifying (R,), best laps
     before the step, after it (R, C)) for the qualifying terms (None: none). stopped: (R, C) standing still on the
-    track and not queuing (`standing_still`; None: never)."""
+    track and not queuing (`standing_still`; None: never). pace: (R, C) the reference speed, m/s (None: the 86.1 m/s
+    top speed); rated_wear: (R, C) the tyre life this step's distance uses at the compound's rated life (None: 0);
+    sector_len: (R, C) a third of the lap, m (None: no sector term); close: (R, C) under 0.5 s behind the car ahead with
+    the safety car called or out (`too_close`; None: never)."""
     rec = events.records
     dyn = events.dynamics
 
@@ -153,13 +188,19 @@ def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: fl
     best = jnp.where(due, jnp.minimum(mem.best, rec.place), mem.best)
     pending = jnp.where(due, 0, pending)
     best = jnp.where(respawned, rec.place, best)  # a new episode
-    mem = Memory(pending, timer, best)
+    # sectors: each third of a lap of progress on the track this episode, paid once (the car's own distance, so a red
+    # flag moving it into the pit lane or back to the grid gives none)
+    on_track = jnp.where(events.off_track, 0.0, events.progress)
+    driven = jnp.where(respawned, 0.0, mem.driven + jnp.where(valid, on_track, 0.0))
+    done = jnp.zeros_like(mem.sectors) if sector_len is None else jnp.floor(driven / sector_len).astype(jnp.int32)
+    sector_paid = jnp.maximum(done - mem.sectors, 0)
+    mem = Memory(pending, timer, best, driven, jnp.where(respawned, 0, jnp.maximum(mem.sectors, done)))
 
     inputs = jnp.abs(actions.steer - last_actions.steer) + jnp.abs(actions.throttle - last_actions.throttle) + jnp.abs(actions.brake - last_actions.brake)
-    slip = dyn.wheelspin + dyn.lockup_front + dyn.lockup_rear
+    slip = dyn.wheelspin + dyn.lockup_front + dyn.lockup_rear + dyn.slide_front + dyn.slide_rear  # drifting costs too
     parts = {
-        "progress": jnp.where(events.off_track, 0.0, events.progress),  # no progress off the track: cutting doesn't pay
-        "crash": events.crashed,
+        "progress": on_track / ((TOP_SPEED if pace is None else pace) * dt),  # no progress off the track: cutting doesn't pay
+        "crash": events.crashed * (CRASH_VICTIM + (1.0 - CRASH_VICTIM) * events.crash_blame),
         "warning": _bits(events.warned),
         "bump": events.bump,
         "pit": events.pit_in,
@@ -170,12 +211,14 @@ def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: fl
         "place_lost": lost,
         "holding": (rec.under_attack & (rec.lost == 0)) * dt,
         "inside_line": rec.inside_line * dt,
-        "tyre_wear": events.tyre_wear * 100.0,
+        "tyre_wear": jnp.maximum(events.tyre_wear - (0.0 if rated_wear is None else rated_wear), 0.0) * 100.0,
         "inputs": inputs,
         "slip": slip,
     }
     zero = jnp.zeros_like(slip)
     parts["standstill"] = zero if stopped is None else stopped * dt
+    parts["sector"] = sector_paid
+    parts["sc_close"] = zero if close is None else close * dt
     if quali is None:
         parts.update(quali_place=zero, quali_q2=zero, quali_q3=zero, quali_lap=zero)
     else:

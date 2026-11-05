@@ -55,6 +55,9 @@ def test_rotation_swaps_the_older_set(pool):
     bank, replaced = rot.rotate()
     assert list(replaced) == [2, 3]
     assert len(rot.seen) == 5  # every track came round before any came back
+    assert rot.passes == 2 and len(rot.this_pass) == 3 and "pass 2" in rot.describe()  # then round again
+    order = lambda seed: Rotation(pool, "normal", n=2, seed=seed, log=None).order  # the tracks not yet taken
+    assert order(0) != order(1)  # another seed, another order
     assert jax.tree.map(lambda a: a.shape, bank) == shapes or bank_sizes(bank) == rot.sizes  # same shapes: no recompile
 
 

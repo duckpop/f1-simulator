@@ -17,4 +17,4 @@ smoothness = 1.5            # (was 2)
 # costs a learning Smooth lost ~0.8 per step, ~270 over its 333-step horizon, and at -70 learned to crash on purpose.
 # At -300 (stage B, 250k steps) it earned +0.10 per step without its crashes, but the crashes (-0.36 per step) swamped
 # everything else, so it went to -140; then -200 (2026-10-30), still well over its ~250-step horizon of driving on
-crash = -200.0
+crash = -230.0              # (was -200; +30 for all)

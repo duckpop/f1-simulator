@@ -34,7 +34,7 @@ def run(bank, cfg, st, actions, key=0):
 
 def test_reset(started):
     cfg, st, obs = started
-    assert obs.shape == (3, 1, de.OBS) and de.OBS == 209
+    assert obs.shape == (3, 1, de.OBS) and de.OBS == 234
     assert np.isfinite(np.asarray(obs)).all()
     assert all(not getattr(a, "weak_type", False) for a in jax.tree.leaves(st))
     assert (np.asarray(st.race.orders.ers) == 2).all()  # ERS deploy
@@ -44,7 +44,7 @@ def test_reset(started):
 def test_race_lengths(bank):
     tid = jnp.zeros(4000, jnp.int32)
     length = float(bank.length[0])
-    full, need = int(np.ceil(305_000 / length)), int(np.ceil(90_000 / length))
+    full, need = int(np.ceil(305_000 / length)), int(np.ceil(de.EnvConfig().pit_km * 1000 / length))
     for share in (0.0, 0.5, 1.0):
         laps = np.asarray(de.race_laps(bank, tid, jax.random.PRNGKey(1), de.EnvConfig(pit_share=share)))
         assert laps.min() >= 5 and laps.max() <= full

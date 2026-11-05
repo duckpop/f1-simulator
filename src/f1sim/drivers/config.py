@@ -67,6 +67,7 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
         pit_km=ev["pit_km"],
         time_factor=ev["time_factor"],
         worn=tuple(ev["worn"]),
+        race=de.EnvConfig().race._replace(respawn=bool(ev.get("respawn", True))),
     )
     unknown = set(own.get("weights", {})) - set(rewards.STYLES)
     if unknown:
