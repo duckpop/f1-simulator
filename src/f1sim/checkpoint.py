@@ -5,12 +5,35 @@ with identity layers (the same driver)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def provenance(repo=REPO) -> dict:
+    """Where a run's code came from: the git commit, whether the code or configs had uncommitted changes, and a hash of
+    the configs (so a checkpoint names exactly what trained it)."""
+    repo = Path(repo)
+    out: dict = {}
+    try:
+        git = lambda *args: subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=10, check=True).stdout
+        out["git"] = git("rev-parse", "HEAD").strip()
+        out["dirty"] = bool(git("status", "--porcelain", "--", "src", "configs", "pyproject.toml").strip())
+    except (OSError, subprocess.SubprocessError):
+        out["git"] = None
+    h = hashlib.sha256()
+    for f in sorted((repo / "configs").rglob("*.toml")):
+        h.update(f.relative_to(repo).as_posix().encode() + b"\0" + f.read_bytes())
+    out["config_sha256"] = h.hexdigest()[:16]
+    return out
 
 
 def save(path, agent, meta: dict | None = None):

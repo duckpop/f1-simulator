@@ -23,12 +23,13 @@ class Settings:
     description: str
     tqc: TQCConfig
     env: de.EnvConfig
-    weights: np.ndarray  # (terms,) reward weight per term
+    weights: np.ndarray  # (terms,) reward weight per term, the reward scale included
     styles: dict  # the profile's multiplier per style term
     start_from: str  # the profile whose stage A networks this one starts from ("": from scratch)
     stage_a: dict
     stage_b: dict
     preset: dict
+    reward_scale: float = 1.0  # [rewards] scale: the weighted sum x this (already in `weights`)
 
 
 def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
@@ -76,16 +77,19 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
     unknown = set(own.get("rewards", {})) - set(rewards.TERMS)
     if unknown:
         raise ValueError(f"{profile}: unknown reward terms {sorted(unknown)} (have: {', '.join(rewards.TERMS)})")
-    base = {**shared.get("rewards", {}), **own.get("rewards", {})}  # a profile's own base values replace the shared ones
+    shared_rewards = dict(shared.get("rewards", {}))
+    scale = float(shared_rewards.pop("scale", 1.0))
+    base = {**shared_rewards, **own.get("rewards", {})}  # a profile's own base values replace the shared ones
     return Settings(
         profile=profile,
         description=own.get("description", ""),
         tqc=cfg,
         env=env,
-        weights=rewards.weights(base, styles),
+        weights=rewards.weights(base, styles, scale),
         styles=styles,
         start_from=own.get("start_from", ""),
         stage_a=shared["stage_a"],
         stage_b=shared["stage_b"],
         preset=p,
+        reward_scale=scale,
     )

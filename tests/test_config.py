@@ -26,7 +26,10 @@ def test_profiles_match_the_spec():
 
 def test_a_profile_can_replace_base_values():
     crash = rewards.TERMS.index("crash")
-    assert {p: float(load(p).weights[crash]) for p in PROFILES} == {"middle": -100.0, "aggressive": -70.0, "smooth": -230.0, "defensive": -150.0}
+    s = {p: load(p) for p in PROFILES}
+    assert all(x.reward_scale == 0.1 for x in s.values())
+    base = {p: round(float(x.weights[crash]) / x.reward_scale) for p, x in s.items()}  # the weights include the scale
+    assert base == {"middle": -2500, "aggressive": -2000, "smooth": -2500, "defensive": -3000}
     assert not load("middle").env.race.respawn  # a crashed car is out for the rest of its race
 
 

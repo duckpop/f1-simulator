@@ -13,4 +13,4 @@ tyre_wear = 1.0
 smoothness = 1.0
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
-crash = -150.0              # more careful: keeping the place matters more than any one move (was -120, v2 -140; +30 for all)
+crash = -3000.0             # more careful: keeping the place matters more than any one move (was -150)

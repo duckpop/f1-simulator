@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from functools import partial
 from pathlib import Path
@@ -93,11 +94,21 @@ class League(NamedTuple):
     steps: jax.Array
 
 
-def make_chunk(cfgs, env_cfg: de.EnvConfig, seats: np.ndarray, weights: np.ndarray, steps: int, updates: int, learn_from: int):
+def stored_seats(seats: np.ndarray, profile: int, share: float = 1.0) -> np.ndarray:
+    """The car numbers of `profile` whose steps go to its replay: the first `share` of its seats (at least one). The
+    grid is random every race, so which seats doesn't matter; storing fewer makes the same buffer cover more time."""
+    idx = np.flatnonzero(seats == profile)
+    return idx[: max(1, int(round(len(idx) * share)))]
+
+
+def make_chunk(cfgs, env_cfg: de.EnvConfig, seats: np.ndarray, weights: np.ndarray, steps: int, updates: int, learn_from: int, stored=None, actor_from: int = 0):
     """cfgs: a TQCConfig per profile; weights (profiles, terms). One jitted call runs `steps` environment steps, each
-    followed by `updates` gradient steps for every profile."""
+    followed by `updates` gradient steps for every profile. stored: per profile, the car numbers whose steps go to its
+    replay (default: all of its seats); actor_from: environment steps before the actors and temperatures learn (until
+    then the critics learn alone, from learn_from)."""
     P, (R, C) = len(cfgs), (env_cfg.races, env_cfg.cars)
     idx = [np.flatnonzero(seats == p) for p in range(P)]
+    stored = idx if stored is None else [np.asarray(x) for x in stored]
     frozen = np.flatnonzero(seats < 0)
     group = np.where(seats < 0, P, seats)  # frozen cars are group P in the stats
     onehot = jnp.asarray(np.eye(P + 1)[group], jnp.float32)  # (C, P + 1)
@@ -121,12 +132,12 @@ def make_chunk(cfgs, env_cfg: de.EnvConfig, seats: np.ndarray, weights: np.ndarr
         env, nxt, out, info = de.step(bank, c.env, actions, k_env, env_cfg)
         reward = jnp.sum(out.amounts * w_car[None], axis=-1)
         agents, replays, ms = [], [], []
-        on = c.steps >= learn_from
+        on, actor_on = c.steps >= learn_from, c.steps >= actor_from
         for p in range(P):
-            sl = idx[p]
+            sl = stored[p]
             flat = lambda x: x[:, sl].reshape((-1,) + x.shape[2:])
             buf = rp.add(c.replays[p], flat(c.obs), flat(actions), flat(reward), flat(out.valid), flat(out.end))
-            agent, m = loop.maybe_learn(on, c.agents[p], cfgs[p], buf, keys[3 + P + p], updates)
+            agent, m = loop.maybe_learn(on, c.agents[p], cfgs[p], buf, keys[3 + P + p], updates, actor_on)
             agents.append(agent)
             replays.append(buf)
             ms.append(m)
@@ -138,11 +149,13 @@ def make_chunk(cfgs, env_cfg: de.EnvConfig, seats: np.ndarray, weights: np.ndarr
             "valid": jnp.einsum("rc,cg->g", out.valid.astype(jnp.float32), onehot),
             "laps": jnp.einsum("rc,cg->g", out.lap_done.astype(jnp.float32), onehot),
             "crashes": jnp.einsum("rc,cg->g", out.crashed.astype(jnp.float32), onehot),
+            "hit": jnp.einsum("rc,cg->g", out.hit.astype(jnp.float32), onehot),
             "reward": jnp.einsum("rc,cg->g", reward, onehot),
             "races": info["races"],
         }
         metrics = {k: jnp.stack([m[k] for m in ms]) for k in tqc.METRICS}
         metrics["learning"] = on.astype(jnp.float32)
+        metrics["actor"] = (on & actor_on).astype(jnp.float32)
         return League(env, nxt, tuple(agents), tuple(replays), c.pool, pool_of, key, c.steps + 1), (stats, metrics)
 
     @partial(jax.jit, donate_argnums=0)
@@ -158,11 +171,13 @@ def push_snapshot(league: League, slot: int, actor) -> League:
     return league._replace(pool=pool)
 
 
-def chunk_record(stats, metrics, profiles, elapsed: float, steps: int) -> dict:
+def chunk_record(stats, metrics, profiles, elapsed: float, steps: int, seats_per_group=None) -> dict:
+    """seats_per_group: (profiles + 1,) cars in each group over all races (the frozen ones last), for the share alive."""
     amounts = np.asarray(stats["amounts"]).sum(axis=0)  # (groups, terms)
     valid = np.asarray(stats["valid"]).sum(axis=0)
     laps = np.asarray(stats["laps"]).sum(axis=0)
     crashes = np.asarray(stats["crashes"]).sum(axis=0)
+    hit = np.asarray(stats["hit"]).sum(axis=0)
     reward = np.asarray(stats["reward"]).sum(axis=0)
     learning = np.asarray(metrics["learning"]) > 0
     t = {name: i for i, name in enumerate(rewards.TERMS)}
@@ -174,17 +189,33 @@ def chunk_record(stats, metrics, profiles, elapsed: float, steps: int) -> dict:
             "laps": float(laps[g]),
             "crashes": float(crashes[g]),
             "crashes_per_lap": float(crashes[g] / max(laps[g], 1.0)),
+            "hit": float(hit[g]),
+            "black_flags": float(amounts[g, t["black_flag"]]),
             "overtakes": float(amounts[g, t["overtake"]]),
             "places_lost": float(amounts[g, t["place_lost"]]),
             "holding_s": float(amounts[g, t["holding"]]),
             "finishes": float(amounts[g, t["finish"]]),
         }
+        if seats_per_group is not None:
+            r["alive"] = float(valid[g] / max(seats_per_group[g] * steps, 1))
         if g < len(profiles):
             r["reward_per_step"] = float(reward[g] / v)
             if learning.any():
                 r.update({k: float(np.asarray(metrics[k])[learning, g].mean()) for k in tqc.METRICS})
+                r["critics_only"] = bool(not (np.asarray(metrics["actor"])[learning] > 0).any())
         rec["profiles"][name] = r
     return rec
+
+
+def line_part(name: str, r: dict) -> str:
+    """One group's part of the log line: the share of its seats alive, crashes (per lap; how many it was hit in), black
+    flags, laps, overtakes; for a learning profile its reward per step and the critics' Q, alpha and entropy."""
+    out = f"{name[:3]} alive {100 * r.get('alive', float('nan')):3.0f}% cr {r['crashes']:3.0f} ({r['crashes_per_lap']:.2f}/lap, hit {r.get('hit', 0):.0f}) bf {r.get('black_flags', 0):.0f} lap {r['laps']:4.0f} ov {r['overtakes']:3.0f}"
+    if "reward_per_step" in r:
+        out += f" r {r['reward_per_step']:6.3f}"
+    if "q" in r:
+        out += f" q {r['q']:6.1f} α {r['alpha']:.4f} H {r['entropy']:5.2f}" + (" (critics only)" if r.get("critics_only") else "")
+    return out
 
 
 def main(argv=None):
@@ -224,8 +255,10 @@ def main(argv=None):
     cfgs = [s.tqc._replace(target_entropy=s.tqc.target_entropy + sb.get("entropy_shift", 0.0)) for s in settings]  # less noise
     per = a.per_profile or sb["per_profile"] * len(PROFILES) // len(names)
     seats = seat_layout(CARS, per, len(names))
-    env_cfg = s0.env._replace(races=p["races_b"], cars=CARS, quali_share=sb["quali_share"], quali_s=sb["quali_s"])
+    # a race restarts once its learners are all out (frozen cars alone don't keep it going)
+    env_cfg = s0.env._replace(races=p["races_b"], cars=CARS, quali_share=sb["quali_share"], quali_s=sb["quali_s"], learners=tuple(bool(x) for x in seats >= 0))
     R = env_cfg.races
+    stored = [stored_seats(seats, i, float(sb.get("store_share", 1.0))) for i in range(len(names))]
 
     key = jax.random.PRNGKey(a.seed)
     agents, replays, done = [], [], 0
@@ -234,10 +267,19 @@ def main(argv=None):
         init = init_path(s.profile, a.out, inits, a.resume, a.init_all)
         base, info = checkpoint.load(init, template, s.tqc)
         done += info.get("env_steps", 0)
-        agents.append(tqc.from_networks(cfgs[i], base.actor, base.critic, base.target, base.log_alpha))
-        slots = R * int((seats == i).sum())
-        replays.append(rp.new(rp.rows_for(p.get("replay_b", p["replay"]), slots), slots, de.OBS, de.ACTIONS))
-        print(f"{s.profile:>10}: from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)  d={s.tqc.drop} H0={cfgs[i].target_entropy} gamma={s.tqc.gamma}")
+        # the same networks: their optimisers carry on; deepened or widened ones start fresh ones
+        exact = "deepened" not in info
+        agent = base if exact else tqc.from_networks(cfgs[i], base.actor, base.critic, base.target, base.log_alpha)
+        factor = s.reward_scale / float(info.get("reward_scale", 1.0))  # checkpoints before the scale: 1
+        if factor != 1.0:
+            agent = tqc.rescale(agent, factor)
+        agents.append(agent)
+        slots = R * len(stored[i])
+        rows = rp.rows_for(p.get("replay_b", p["replay"]), slots)
+        replays.append(rp.new(rows, slots, de.OBS, de.ACTIONS))
+        notes = ["optimisers kept" if exact else "fresh optimisers"] + ([f"rewards x{factor:g} since: critics rescaled"] if factor != 1.0 else [])
+        print(f"{s.profile:>10}: from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)  d={s.tqc.drop} H0={cfgs[i].target_entropy} gamma={s.tqc.gamma}  ({', '.join(notes)})")
+        print(f"{'':>10}  replay: {len(stored[i])} of {int((seats == i).sum())} seats per race stored, {rows:,} steps ({rows * 0.05 / 60:.0f} min of racing)")
     K = sb["snapshots"]
     pool = stack([agents[k % len(agents)].actor for k in range(K)])
     n_frozen = int((seats < 0).sum())
@@ -251,14 +293,22 @@ def main(argv=None):
     key, k_reset, k_pool = jax.random.split(key, 3)
     env_state, obs = de.compiled("reset", env_cfg)(bank, k_reset, pick=rot.pick)
     league = League(env_state, obs, tuple(agents), tuple(replays), pool, jax.random.randint(k_pool, (R, n_frozen), 0, K), key, jnp.zeros((), jnp.int32))
-    learn_from = max(int(sb["warmup"]) // (R * per), s0.tqc.batch // (R * per) + s0.tqc.n_step + 1)
+    learn_from = max(int(sb.get("warmup_steps", 0)), s0.tqc.batch // min(R * len(x) for x in stored) + s0.tqc.n_step + 1)
+    actor_from = learn_from + -(-int(sb.get("critic_warmup", 0)) // p["updates"])
+    print(f"learning from step {learn_from:,}: the critics alone until step {actor_from:,}, then the actors and temperatures too")
     weights = np.stack([s.weights for s in settings])
-    chunk = make_chunk(cfgs, env_cfg, seats, weights, p["chunk"], p["updates"], learn_from)
+    chunk = make_chunk(cfgs, env_cfg, seats, weights, p["chunk"], p["updates"], learn_from, stored, actor_from)
+    group = np.where(seats < 0, len(names), seats)
+    seats_per_group = R * np.bincount(group, minlength=len(names) + 1)
 
     outs = {s.profile: Path(a.out) / s.profile / "stage-b" for s in settings}
     for o in outs.values():
         o.mkdir(parents=True, exist_ok=True)
     log_file = open(Path(a.out) / "stage-b-log.jsonl", "a")
+    prov = checkpoint.provenance()
+    log_file.write(json.dumps({"kind": "start", "argv": argv if argv is not None else sys.argv[1:], "reward_scale": s0.reward_scale, "profiles": list(names), "seats_per_group": [int(x) for x in seats_per_group], **prov}) + "\n")
+    if prov.get("dirty"):
+        print(f"note: the code has uncommitted changes (git {prov.get('git', '?')[:10]}): this run can't be reproduced from git alone")
     budget = a.steps or p["steps_b"]
     eval_every, snap_every = a.eval_every or p.get("eval_every_b", p["eval_every"]), a.snapshot_every or sb["snapshot_every"]
     next_eval, next_snap, slot, turn = eval_every, snap_every, 0, 0
@@ -288,18 +338,15 @@ def main(argv=None):
         league, (stats, metrics) = chunk(league, bank)
         jax.block_until_ready(league.steps)
         n = int(league.steps)
-        rec = chunk_record(stats, metrics, names, time.time() - t0, p["chunk"])
+        rec = chunk_record(stats, metrics, names, time.time() - t0, p["chunk"], seats_per_group)
         log_file.write(json.dumps({"kind": "chunk", "env_steps": n, **rec}) + "\n")
         log_file.flush()
-        parts = []
-        for name, r in rec["profiles"].items():
-            parts.append(f"{name[:3]} cr {r['crashes']:3.0f} lap {r['laps']:4.0f} ov {r['overtakes']:3.0f}" + (f" r {r['reward_per_step']:5.2f}" if "reward_per_step" in r else ""))
-        print(f"{n:>9,} steps {rec['env_steps_per_s']:5.0f}/s | " + " | ".join(parts), flush=True)
+        print(f"{n:>9,} steps {rec['env_steps_per_s']:5.0f}/s | " + " | ".join(line_part(name, r) for name, r in rec["profiles"].items()), flush=True)
 
         if next_rotate and n >= next_rotate:  # a fresh set of training tracks
             next_rotate += rotate_every
             bank, env_state, obs, hit = rotate_races(rot, league.env, league.obs, jax.random.fold_in(league.key, n), env_cfg)
-            cut = tuple(rp.cut_last(buf, jnp.asarray(np.repeat(hit, int((seats == q).sum())))) for q, buf in enumerate(league.replays))
+            cut = tuple(rp.cut_last(buf, jnp.asarray(np.repeat(hit, len(stored[q])))) for q, buf in enumerate(league.replays))
             league = league._replace(env=env_state, obs=obs, replays=cut)
             print(f"  tracks: {rot.describe()}; {int(hit.sum())} races restarted", flush=True)
         if n >= next_snap:  # a copy of one profile's actor into the pool, replacing the oldest
@@ -317,7 +364,7 @@ def main(argv=None):
             for s, ag in zip(settings, league.agents):
                 r = res["profiles"][s.profile]
                 r = {**r, "solo": res["solo"][s.profile]}
-                meta = {"profile": s.profile, "preset": a.preset, **eval_meta, "env_steps": n, "eval": r}
+                meta = {"profile": s.profile, "preset": a.preset, **eval_meta, "env_steps": n, "eval": r, "reward_scale": s.reward_scale, **prov}
                 checkpoint.save(outs[s.profile] / "latest.npz", ag, meta)
                 improved = evaluate.better_mixed(r, best[s.profile])
                 if improved:
@@ -326,7 +373,7 @@ def main(argv=None):
                 print(f"  eval {s.profile:>10}: {evaluate.summary_mixed(r)}{'  (best)' if improved else ''}", flush=True)
                 print(f"  solo {s.profile:>10}: {evaluate.summary(r['solo'])}", flush=True)
     for s, ag in zip(settings, league.agents):
-        checkpoint.save(outs[s.profile] / "latest.npz", ag, {"profile": s.profile, "preset": a.preset, "stage": "B", "env_steps": int(league.steps)})
+        checkpoint.save(outs[s.profile] / "latest.npz", ag, {"profile": s.profile, "preset": a.preset, "stage": "B", "env_steps": int(league.steps), "reward_scale": s.reward_scale, **prov})
     print(f"stage B: {int(league.steps):,} steps in {(time.time() - t_start) / 60:.1f} min")
     log_file.close()
 

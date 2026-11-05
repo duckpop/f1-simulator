@@ -87,3 +87,24 @@ def test_update_moves_networks_alpha_and_target():
         np.testing.assert_allclose(np.asarray(t1), np.asarray((1 - cfg.tau) * t0 + cfg.tau * c1), rtol=1e-5, atol=1e-6)
     # the policy is far more random than H0 = -10 asks: alpha goes down
     assert float(new.log_alpha) < float(agent.log_alpha)
+
+
+def test_a_critic_warm_up_keeps_the_actor_and_alpha():
+    cfg = small(target_entropy=-10.0)
+    agent = tqc.init(jax.random.PRNGKey(0), cfg)
+    k = jax.random.split(jax.random.PRNGKey(1), 4)
+    batch = tqc.Batch(jax.random.normal(k[0], (8, 6)), jax.random.uniform(k[1], (8, 2), minval=-1, maxval=1), jnp.ones(8), jnp.full(8, 0.99), jax.random.normal(k[2], (8, 6)))
+    new, _ = jax.jit(lambda a, b, key: tqc.update(a, cfg, b, key, actor_on=False))(agent, batch, k[3])
+    same = lambda x, y: all(np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(jax.tree.leaves(x), jax.tree.leaves(y)))
+    assert same(agent.actor, new.actor) and same(agent.actor_opt, new.actor_opt) and float(new.log_alpha) == float(agent.log_alpha)
+    assert not same(agent.critic, new.critic)
+
+
+def test_rescale_multiplies_q_and_alpha():
+    cfg = small()
+    agent = tqc.init(jax.random.PRNGKey(0), cfg)
+    obs, act = jnp.ones((3, 6)), jnp.zeros((3, 2))
+    scaled = tqc.rescale(agent, 0.1)
+    q0, q1 = nets.ensemble(agent.critic, cfg.encoder, obs, act), nets.ensemble(scaled.critic, cfg.encoder, obs, act)
+    np.testing.assert_allclose(np.asarray(q1), 0.1 * np.asarray(q0), rtol=2e-3, atol=1e-5)  # the GPU's TF32 matmuls
+    np.testing.assert_allclose(float(jnp.exp(scaled.log_alpha)), 0.1 * float(jnp.exp(agent.log_alpha)), rtol=1e-5)

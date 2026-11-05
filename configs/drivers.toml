@@ -17,8 +17,11 @@ conv = [[32, 5, 2], [64, 3, 2]]    # lidar: (filters, width, stride) along the 5
 other_hidden = [128]               # the other ~59 inputs
 
 [rewards]                   # base values per unit (f1sim.drivers.rewards); profiles multiply the style terms
+scale = 0.1                 # the weighted sum x this: the critics see a crash as -250, a step at reference pace +0.1
 progress = 1.0              # per step's worth of reference pace (the lap simulation's speed there, or the limit)
-crash = -100.0              # (was -70; every profile's 30 more since 2026-11-01)
+crash = -2500.0             # the full cost for every car in a contact crash, the one hit too (since 2026-11-05; was
+                            # -100 by blame: the drivers took ~6 points more crash risk per lap for +1% of pace)
+black_flag = -2500.0        # disqualified (the 4th warning): as much as a crash, so never a cheaper way out
 sector = 10.0               # each third of a lap driven on the track, once
 sc_close = -5.0             # per second closer than 0.5 s behind the car ahead with the safety car called or out
 warning = -50.0
@@ -62,19 +65,23 @@ snapshots = 8               # frozen snapshot pool: starts with the stage A best
 snapshot_every = 100_000    # environment steps between copies of a profile's actor into the pool (in turn)
 quali_share = 0.2           # sessions that are short qualifying sessions
 quali_s = 720.0             # their length (Q3's 12 minutes), two runs each
-warmup = 10_000             # transitions per profile before the first update
+warmup_steps = 2_000        # environment steps before the first update (the replay fills with this run's driving)
+critic_warmup = 30_000      # gradient steps on the critics alone first (the actor and alpha wait), so the critics
+                            # learn this run's rewards before the driver follows them
+store_share = 0.25          # learning seats stored in the replay (a quarter: the same buffer covers 4x the time)
 eval_reference = "runs/reference/middle-together-250k.npz"   # the eval's fixed field in the odd cars ("none": off): a
                             # driver that has raced in traffic (stage A's best crashed on lap 1 in 89-98% of its cars)
-solo_laps = 5               # each eval also runs every profile alone on the eval tracks for this many laps
-entropy_shift = -1.0        # each profile's target entropy (H0) in stage B is this much lower: less action noise, so
-                            # training drives closer to the noise-free eval (noise cut tyre life by half, 59 -> 28 km)
+solo_laps = 20              # each eval also runs every profile alone on the eval tracks for this many laps
+entropy_shift = -5.0        # each profile's target entropy (H0) in stage B is this much lower: less action noise, so
+                            # training drives closer to the noise-free eval (at -1 together5's noisy learners crashed
+                            # 3-5x as often per lap as frozen copies of their start driving the mean action)
 
 [preset.laptop]             # RTX 3050 Ti, 4 GB (the trainers let JAX use 92%, ~3.4 GB): stage A peaks at ~2.8 GB in use
 races = 64                  # stage A: one car per race; a step costs about the same for 8 or 256 races
 replay = 2_000_000          # transitions (~0.43 KB each)
 tracks = 20                 # training tracks in a set; two sets on the GPU (~24 MB a track); 32 ran out after an hour
 rotate_every = 100_000      # environment steps between fresh sets of tracks, so a run works through the pool
-chunk = 500                 # environment steps per jitted call
+chunk = 1000                # environment steps per jitted call (and per log line)
 updates = 1                 # gradient steps per environment step
 eval_every = 50_000         # environment steps (stage A)
 eval_every_b = 50_000       # stage B: a full weekend per eval track (Q1-Q3, then the race)

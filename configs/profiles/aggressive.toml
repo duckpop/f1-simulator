@@ -13,4 +13,4 @@ tyre_wear = 0.5
 smoothness = 0.5
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
-crash = -70.0               # bolder: a crash costs less than for the others (was -40, as v2's car contact -45; +30 for all)
+crash = -2000.0             # bolder: a crash costs less than for the others, still far beyond any gain (was -70)

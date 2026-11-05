@@ -88,8 +88,10 @@ def nstep(reward, end, valid, n: int, gamma: float):
     return ret, discount, k_stop
 
 
-def sample(buf: Replay, key, batch: int, n: int, gamma: float, candidates: int = 4) -> Batch:
-    """A batch of n-step transitions, uniform over valid starting steps (drawn from `candidates` x batch tries)."""
+def sample(buf: Replay, key, batch: int, n: int, gamma: float, candidates: int = 16) -> Batch:
+    """A batch of n-step transitions, uniform over valid starting steps (drawn from `candidates` x batch tries, so with
+    a quarter of the rows valid a batch still has few repeats). `ok` is False if no try found a valid step: the batch
+    is then meaningless and the learner skips it (`loop.learn`)."""
     rows, slots = buf.reward.shape
     k_row, k_slot, k_pick = jax.random.split(key, 3)
     tries = batch * candidates
@@ -104,7 +106,7 @@ def sample(buf: Replay, key, batch: int, n: int, gamma: float, candidates: int =
     idx = (t0[:, None] + jnp.arange(n + 1)[None]) % rows  # (B, n + 1)
     ret, discount, k = nstep(buf.reward[idx, s[:, None]], buf.end[idx, s[:, None]], buf.valid[idx, s[:, None]], n, gamma)
     t_next = jnp.take_along_axis(idx, k[:, None], axis=1)[:, 0]
-    return Batch(buf.obs[t0, s], buf.action[t0, s], ret, discount, buf.obs[t_next, s])
+    return Batch(buf.obs[t0, s], buf.action[t0, s], ret, discount, buf.obs[t_next, s], total > 0)
 
 
 def cut_last(buf: Replay, mask) -> Replay:

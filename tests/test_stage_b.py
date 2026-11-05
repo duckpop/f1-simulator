@@ -45,11 +45,14 @@ def test_league_chunk(bank):
     st, obs = jax.jit(partial(de.reset, cfg=env_cfg))(bank, jax.random.PRNGKey(0))
     league = stage_b.League(st, obs, tuple(agents), tuple(replays), pool, jnp.zeros((1, 6), jnp.int32), jax.random.PRNGKey(1), jnp.zeros((), jnp.int32))
     weights = np.stack([rewards.weights() for _ in cfgs])
-    chunk = stage_b.make_chunk(cfgs, env_cfg, seats, weights, steps=20, updates=1, learn_from=10)
+    # 200 steps: the cars are held at the lights for the first 5-8 s, and nothing is learned from a batch with no
+    # step the driver controlled
+    chunk = stage_b.make_chunk(cfgs, env_cfg, seats, weights, steps=200, updates=1, learn_from=10)
     before = [jax.tree.map(jnp.copy, a.actor) for a in agents]  # the chunk donates the agents
     league, (stats, metrics) = chunk(league, bank)
-    assert int(league.steps) == 20 and all(int(r.size) == 20 for r in league.replays)
-    assert stats["amounts"].shape == (20, 5, len(rewards.TERMS)) and metrics["q"].shape == (20, 4)
+    assert int(league.steps) == 200 and all(int(r.size) == 64 for r in league.replays)
+    assert stats["amounts"].shape == (200, 5, len(rewards.TERMS)) and metrics["q"].shape == (200, 4)
+    assert float(np.abs(np.asarray(metrics["q"][:100])).max()) == 0.0  # before the lights: no valid batch, no update
     moved = lambda x, y: any(float(jnp.max(jnp.abs(a - b))) > 0 for a, b in zip(jax.tree.leaves(x), jax.tree.leaves(y)))
     assert all(moved(b, a.actor) for b, a in zip(before, league.agents))  # every profile learned
     assert int(league.pool_of.max()) < 3
@@ -83,3 +86,29 @@ def test_eval_weekend(tracks):
     for p in r["profiles"].values():
         assert 0 <= p["distance"] <= 1 and p["eval_version"] == evaluate.EVAL_VERSION
     assert np.isnan(r["profiles"]["reference"]["reward_per_step"]) and np.isfinite(r["profiles"]["middle"]["reward_per_step"])
+
+
+def test_stored_seats_take_a_share_of_a_profiles_seats():
+    seats = stage_b.seat_layout(22, 16, 1)  # one profile: 16 learning, 6 frozen
+    assert list(stage_b.stored_seats(seats, 0, 0.25)) == [0, 1, 2, 3]
+    assert len(stage_b.stored_seats(seats, 0)) == 16
+    four = stage_b.seat_layout(22, 4)
+    assert len(stage_b.stored_seats(four, 2, 0.25)) == 1  # at least one
+
+
+def test_a_race_restarts_once_its_learners_are_out():
+    """With `learners`, a race is over when none of those cars is going, whatever the others do."""
+    from types import SimpleNamespace
+
+    from f1env.race import OUT, RACING, RaceConfig
+
+    bank = SimpleNamespace(length=jnp.array([5000.0]))
+    status = jnp.array([[OUT, OUT, RACING]])  # the two learners are out, a frozen car runs on
+    race = SimpleNamespace(
+        status=status, dnf=status == OUT, flags=SimpleNamespace(black=jnp.zeros((1, 3), bool)), line=jnp.zeros((1, 3)), tid=jnp.array([0]),
+        target_laps=jnp.array([5]), clock=jnp.array([10.0]), flag=jnp.array([False]),
+    )
+    limit = jnp.array([1e6])
+    no_respawn = RaceConfig(respawn=False)
+    assert not bool(de.race_done(bank, race, limit, de.EnvConfig(cars=3, race=no_respawn))[0])
+    assert bool(de.race_done(bank, race, limit, de.EnvConfig(cars=3, race=no_respawn, learners=(True, True, False)))[0])

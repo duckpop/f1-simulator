@@ -233,6 +233,7 @@ def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int, names=PROFIL
             "off_track_share": float(amounts[:, sl, t["off_track"]].sum() / max(valid[:, sl].sum() * STEP_S, 1e-9)),
             "mean_grid_slot": float(grids[..., sl].mean() + 1),
             "titles": int(sum(c == p for c in champions)),
+            **evaluate.incidents(crashes[:, sl].sum() + amounts[:, sl, t["black_flag"]].sum(), km),
         }
     return res
 

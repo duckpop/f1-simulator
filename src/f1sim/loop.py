@@ -36,22 +36,26 @@ class Carry(NamedTuple):
     steps: jax.Array  # environment steps so far
 
 
-def learn(agent: tqc.TQCState, cfg: tqc.TQCConfig, replay: rp.Replay, key, updates: int):
-    """`updates` gradient steps, each on a fresh batch from the replay; the metrics averaged over them."""
+def _zeros():
+    return {k: jnp.zeros((), jnp.float32) for k in tqc.METRICS}
+
+
+def learn(agent: tqc.TQCState, cfg: tqc.TQCConfig, replay: rp.Replay, key, updates: int, actor_on=True):
+    """`updates` gradient steps, each on a fresh batch from the replay (skipped if the batch found no valid step); the
+    metrics averaged over them. actor_on (traced): False trains the critics only (`tqc.update`)."""
 
     def one(agent, k):
         k_sample, k_update = jax.random.split(k)
         batch = rp.sample(replay, k_sample, cfg.batch, cfg.n_step, cfg.gamma)
-        return tqc.update(agent, cfg, batch, k_update)
+        return jax.lax.cond(batch.ok, lambda: tqc.update(agent, cfg, batch, k_update, actor_on), lambda: (agent, _zeros()))
 
     agent, m = jax.lax.scan(one, agent, jax.random.split(key, updates))
     return agent, jax.tree.map(jnp.mean, m)
 
 
-def maybe_learn(on, agent: tqc.TQCState, cfg: tqc.TQCConfig, replay: rp.Replay, key, updates: int):
+def maybe_learn(on, agent: tqc.TQCState, cfg: tqc.TQCConfig, replay: rp.Replay, key, updates: int, actor_on=True):
     """learn() if `on` (traced), else the agent unchanged and zero metrics."""
-    zeros = {k: jnp.zeros((), jnp.float32) for k in tqc.METRICS}
-    return jax.lax.cond(on, lambda: learn(agent, cfg, replay, key, updates), lambda: (agent, zeros))
+    return jax.lax.cond(on, lambda: learn(agent, cfg, replay, key, updates, actor_on), lambda: (agent, _zeros()))
 
 
 def make_chunk(env_step, cfg: tqc.TQCConfig, steps: int, updates: int = 1, warmup: int = 0, learn_from: int = 0):

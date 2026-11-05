@@ -14,7 +14,7 @@ def events(gained=0, lost=0, place=5, progress=0.0, off=False):
     rec = SimpleNamespace(gained=i(gained), lost=i(lost), place=i(place), under_attack=z > 0, inside_line=z > 0)
     dyn = SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z, slide_front=z, slide_rear=z)
     return SimpleNamespace(
-        records=rec, dynamics=dyn, progress=z + progress, crashed=z > 0, crash_blame=z, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, respawned=z > 0,
+        records=rec, dynamics=dyn, progress=z + progress, crashed=z > 0, crash_blame=z, black_flag=z > 0, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, respawned=z > 0,
         off_track=jnp.full((1, 1), off),
     )
 
@@ -41,7 +41,7 @@ def test_qualifying_standing_and_laps():
     ev = SimpleNamespace(
         records=SimpleNamespace(gained=i(0), lost=i(0), place=i(1), under_attack=z > 0, inside_line=z > 0),
         dynamics=SimpleNamespace(wheelspin=z, lockup_front=z, lockup_rear=z, slide_front=z, slide_rear=z),
-        progress=z, crashed=z > 0, crash_blame=z, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, off_track=z > 0,
+        progress=z, crashed=z > 0, crash_blame=z, black_flag=z > 0, warned=i(0), bump=z > 0, pit_in=z > 0, tyre_dead=z > 0, finished=z > 0, tyre_wear=z, off_track=z > 0,
     )
     mem = rw.new_memory(jnp.ones((1, 22)))
     on = jnp.ones(1, bool)
@@ -93,7 +93,7 @@ def test_profile_weights_scale_style_terms_only():
     w = dict(zip(rw.TERMS, rw.weights(None, {"overtake": 2.0, "smoothness": 0.5})))
     assert w["overtake"] == 2 * rw.BASE["overtake"] and w["place_lost"] == rw.BASE["place_lost"]
     assert w["inputs"] == 0.5 * rw.BASE["inputs"] and w["slip"] == 0.5 * rw.BASE["slip"]
-    assert w["progress"] == rw.BASE["progress"] and w["crash"] == -100.0
+    assert w["progress"] == rw.BASE["progress"] and w["crash"] == -2500.0
     assert rw.BASE["progress"] == 1.0  # a step at reference pace is worth +1
 
 
@@ -134,16 +134,32 @@ def test_tyre_wear_beyond_the_rated_wear():
     assert float(under[0, 0, TERM["tyre_wear"]]) == 0.0  # gentler than rated: no cost (and no credit)
 
 
-def test_a_contact_crash_costs_by_blame():
-    """The car that drove into the other pays the full crash cost, the car it hit 30%; a crash alone the full cost."""
+def test_every_car_in_a_crash_pays_the_full_cost():
+    """The car that drove into the other and the car it hit both pay the full crash cost, as does a crash alone."""
     a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
     mem = rw.new_memory(jnp.full((1, 1), 5))
     on, f = jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool)
-    for blame, cost in ((1.0, 1.0), (0.0, rw.CRASH_VICTIM), (0.5, 0.65)):
+    for blame in (1.0, 0.0, 0.5):
         ev = events()
         ev.crashed, ev.crash_blame = jnp.ones((1, 1), bool), jnp.full((1, 1), blame)
         out, _ = rw.amounts(ev, a, a, mem, on, f)
-        assert np.isclose(float(out[0, 0, TERM["crash"]]), cost)
+        assert np.isclose(float(out[0, 0, TERM["crash"]]), 1.0)
+
+
+def test_a_black_flag_costs_as_much_as_a_crash():
+    """The 4th warning's black flag is its own term, at the crash's base value: never a cheaper way out."""
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    ev = events()
+    ev.black_flag = jnp.ones((1, 1), bool)
+    out, _ = rw.amounts(ev, a, a, rw.new_memory(jnp.full((1, 1), 5)), jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool))
+    assert float(out[0, 0, TERM["black_flag"]]) == 1.0
+    w = rw.weights()
+    assert w[TERM["black_flag"]] == w[TERM["crash"]] == -2500.0
+
+
+def test_the_reward_scale_multiplies_every_weight():
+    w, w10 = rw.weights(), rw.weights(scale=0.1)
+    assert np.allclose(w10, 0.1 * w)
 
 
 def test_a_sector_for_each_third_of_a_lap_driven():

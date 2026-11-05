@@ -6,9 +6,12 @@ respawn and each actor's mean action.
   lap time (against each track's lap simulation), tyre stints and km per set of tyres.
 - **Mixed**: stage B's eval is a full weekend per eval track (`season.eval_weekend`), the profiles against a fixed
   reference field; `better_mixed` and `summary_mixed` rank and print its per-profile results.
-- **Picking the best** (`better`, `better_mixed`): continuous measures, so one crash doesn't decide it: the distance
-  completed (and in stage B first the points against the reference field), then, within 2% of it, the profile's
-  reward per step. Evals before 2026-10-31 (EVAL_VERSION 1) measured other things and aren't compared.
+- **Incidents per 100 km**: crashes and black flags per 100 km driven on the track, with a 95% confidence interval
+  (Poisson), alone and in the weekend race.
+- **Picking the best** (`better`, `better_mixed`): continuous measures, so one crash doesn't decide it: in stage B
+  first fewer incidents per 100 km in the race, when the difference is beyond the noise (`safer`); else the points
+  against the reference field; then the distance completed and, within 2% of it, the profile's reward per step. Evals
+  of another version (before 2026-11-05: EVAL_VERSION 1 and 2, other rewards and measures) aren't compared.
 
     f1sim-eval --checkpoint runs/middle/stage-a/best.npz --tracks tracks --laps 50
 
@@ -18,6 +21,7 @@ v2 to beat (alone, 50 laps): finished 53%, crashes 1.39% per lap.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from functools import lru_cache
 
@@ -35,9 +39,46 @@ from . import env as de
 from .config import PROFILES
 from .rewards import TERMS
 
-EVAL_VERSION = 2  # 2026-10-31: completed distance, the profile's reward per step, the reference field
+EVAL_VERSION = 3  # 2026-11-05: incidents per 100 km first; rewards x0.1 and crashes at -2500 (2: 2026-10-31)
 DISTANCE_BAND = 0.02  # within this share of the distance completed, the reward per step decides
 POINTS_BAND = 0.1  # stage B: within this many points per race, the distance and then the reward decide
+Z95 = 1.96
+
+
+def per_100km(count: float, km: float) -> tuple[float, float, float]:
+    """(rate, low, high): events per 100 km and a 95% interval for it (Byar's approximation to the exact Poisson one)."""
+    km = float(km)  # plain floats: numpy ones don't go into the JSON log
+    if km <= 0:
+        return float("nan"), float("nan"), float("nan")
+    k = float(count)
+    lo = 0.0 if k == 0 else k * (1 - 1 / (9 * k) - Z95 / (3 * math.sqrt(k))) ** 3
+    k1 = k + 1
+    hi = k1 * (1 - 1 / (9 * k1) + Z95 / (3 * math.sqrt(k1))) ** 3
+    f = 100.0 / km
+    return k * f, lo * f, hi * f
+
+
+def incidents(count: float, km: float) -> dict:
+    rate, lo, hi = per_100km(count, km)
+    return {"incidents": float(count), "km": float(km), "incidents_per_100km": rate, "incidents_ci": [lo, hi]}
+
+
+def safer(a: dict, b: dict) -> int:
+    """-1: a has fewer incidents per km than b beyond the noise (a two-sided 95% test on the two Poisson rates), 1:
+    more, 0: within the noise (or not measured)."""
+    if not all(k in r for r in (a, b) for k in ("incidents", "km")) or a["km"] <= 0 or b["km"] <= 0:
+        return 0
+    ka, kb, ma, mb = a["incidents"], b["incidents"], a["km"], b["km"]
+    se = math.sqrt((ka + 0.5) / ma**2 + (kb + 0.5) / mb**2)
+    z = (ka / ma - kb / mb) / se
+    return -1 if z < -Z95 else (1 if z > Z95 else 0)
+
+
+def incidents_text(r: dict) -> str:
+    if not np.isfinite(r.get("incidents_per_100km", np.nan)):
+        return ""
+    lo, hi = r["incidents_ci"]
+    return f"incidents {r['incidents_per_100km']:.2f}/100 km [{lo:.2f}-{hi:.2f}] ({r['incidents']:.0f} in {r['km']:.0f} km)  "
 
 
 def eval_config(n_races: int, laps: int) -> de.EnvConfig:
@@ -103,6 +144,7 @@ def alone(bank, actor, cfg: tqc.TQCConfig, laps: int, seeds: int = 1, key=None, 
         "dead_tyre_s": totals.get("dead_tyre", 0.0) * 0.05,
         "off_track_share": totals.get("off_track_s", 0.0) / max(totals.get("valid", 0.0) * 0.05, 1e-9),
         "steps": steps,
+        **incidents(totals.get("crashes", 0.0) + totals.get("black_flags", 0.0), totals.get("metres", 0.0) / 1000.0),
     }
 
 
@@ -128,14 +170,18 @@ def summary(r: dict) -> str:
     crashes = f"crashes {100 * r['crashes_per_lap']:.2f}%/lap" if r["laps"] >= 1 else f"{r['crashes_per_lap']:.0f} crashes, no lap done"
     new = f"distance {100 * r['distance']:.1f}%  reward {r['reward_per_step']:.3f}/step  " if "distance" in r else ""
     tyres = f"  {r['km_per_tyre_set']:.0f} km/set" if "km_per_tyre_set" in r else ""
-    return f"{new}finished {100 * r['finish_rate']:.0f}%  {crashes}  lap x{r['lap_ratio']:.3f} of the lap sim  off track {100 * r.get('off_track_share', 0.0):.1f}%  {r['laps_per_stint']:.1f} laps/stint{tyres}  ({r['laps']:.0f} laps)"
+    return f"{incidents_text(r)}{new}finished {100 * r['finish_rate']:.0f}%  {crashes}  lap x{r['lap_ratio']:.3f} of the lap sim  off track {100 * r.get('off_track_share', 0.0):.1f}%  {r['laps_per_stint']:.1f} laps/stint{tyres}  ({r['laps']:.0f} laps)"
 
 
 def better_mixed(a: dict, b: dict | None) -> bool:
-    """Stage B: more than 0.1 more points per race (against the fixed reference field), else the distance and the reward
-    per step as in `better`. An older eval (another version) is no bar."""
+    """Stage B: fewer incidents per 100 km in the race beyond the noise (`safer`); within it, more than 0.1 more points
+    per race (against the fixed reference field); else the distance and the reward per step as in `better`. An older
+    eval (another version) is no bar."""
     if b is None or _version(b) != _version(a):
         return True
+    side = safer(a, b)
+    if side:
+        return side < 0
     if abs(a["points_per_race"] - b["points_per_race"]) > POINTS_BAND:
         return a["points_per_race"] > b["points_per_race"]
     return _distance_then_reward(a, b)
@@ -146,7 +192,7 @@ def summary_mixed(r: dict) -> str:
     held = f"{100 * r['attacks_held']:.0f}%" if np.isfinite(r.get("attacks_held", np.nan)) else "-"
     new = f"distance {100 * r['distance']:.1f}%  reward {r['reward_per_step']:.3f}/step  " if "distance" in r else ""
     return (
-        f"{r['points_per_race']:5.2f} pts/race  {new}finished {100 * r['finish_rate']:3.0f}%  out on lap 1 {100 * r['out_lap1']:3.0f}%  "
+        f"{r['points_per_race']:5.2f} pts/race  {incidents_text(r)}{new}finished {100 * r['finish_rate']:3.0f}%  out on lap 1 {100 * r['out_lap1']:3.0f}%  "
         f"{crashes}  off track {100 * r.get('off_track_share', 0.0):.1f}%  overtakes {r['overtakes_per_race']:.2f}  lost {r['places_lost_per_race']:.2f}  attacks held {held}"
     )
 

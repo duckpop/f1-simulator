@@ -9,6 +9,7 @@ each. The target pools all N x M atoms of the target critics at the next state, 
     action = act(agent.actor, cfg, obs, key)                  # sampled (training) ...
     action = act(agent.actor, cfg, obs, key, mean=True)       # ... or the mean (evals)
     agent, metrics = update(agent, cfg, batch, key)           # one gradient step on the critics, actor and alpha
+    agent, metrics = update(agent, cfg, batch, key, actor_on=False)   # the critics only (a warm-up)
 """
 
 from __future__ import annotations
@@ -65,10 +66,11 @@ class Batch(NamedTuple):
     reward: jax.Array  # (B,) the discounted n-step sum
     discount: jax.Array  # (B,) gamma^k for the bootstrap, 0 after a terminal
     next_obs: jax.Array  # (B, obs_dim) the state k steps on
+    ok: object = True  # the batch holds real samples (replay.sample: some valid starting step was drawn)
 
 
-def _adam(cfg: TQCConfig):
-    return optax.adam(cfg.lr)
+def _adam(cfg: TQCConfig | None):
+    return optax.adam(TQCConfig._field_defaults["lr"] if cfg is None else cfg.lr)
 
 
 def init(key, cfg: TQCConfig) -> TQCState:
@@ -86,6 +88,19 @@ def from_networks(cfg: TQCConfig, actor, critic, target=None, log_alpha=None) ->
     log_alpha = jnp.log(jnp.asarray(cfg.init_alpha, jnp.float32)) if log_alpha is None else jnp.asarray(log_alpha, jnp.float32)
     opt = _adam(cfg)
     return TQCState(actor, critic, target, log_alpha, opt.init(actor), opt.init(critic), opt.init(log_alpha), jnp.zeros((), jnp.int32))
+
+
+def rescale(s: TQCState, factor: float) -> TQCState:
+    """The same agent for rewards x `factor`: the critics' outputs (their last layer is linear) and the temperature
+    scale with the reward, so the actor's loss keeps its shape. The critics' optimiser starts afresh (its moments were
+    for the old scale)."""
+
+    def scaled(net):
+        last = net["head"][-1]
+        return {**net, "head": net["head"][:-1] + [{"w": last["w"] * factor, "b": last["b"] * factor}]}
+
+    critic = scaled(s.critic)
+    return s._replace(critic=critic, target=scaled(s.target), log_alpha=s.log_alpha + jnp.log(jnp.asarray(factor, jnp.float32)), critic_opt=_adam(None).init(critic))
 
 
 def act(actor, cfg: TQCConfig, obs, key, mean: bool = False):
@@ -113,8 +128,9 @@ def quantile_huber(z, target, kappa: float = 1.0):
     return jnp.mean(weight * huber / kappa)
 
 
-def update(s: TQCState, cfg: TQCConfig, batch: Batch, key):
-    """One gradient step on the critics, then the actor, then the temperature; then the target critics (Polyak)."""
+def update(s: TQCState, cfg: TQCConfig, batch: Batch, key, actor_on=True):
+    """One gradient step on the critics, then the actor, then the temperature; then the target critics (Polyak).
+    actor_on (traced): False keeps the actor, the temperature and their optimisers as they were (a critic warm-up)."""
     k_next, k_now = jax.random.split(key)
     enc = cfg.encoder
     obs, next_obs = batch.obs.astype(jnp.float32), batch.next_obs.astype(jnp.float32)
@@ -151,6 +167,8 @@ def update(s: TQCState, cfg: TQCConfig, batch: Batch, key):
     step, alpha_opt = opt.update(grad, s.alpha_opt, s.log_alpha)
     log_alpha = optax.apply_updates(s.log_alpha, step)
 
+    keep = lambda new, old: jax.tree.map(lambda n, o: jnp.where(actor_on, n, o), new, old)
+    actor, actor_opt, log_alpha, alpha_opt = keep((actor, actor_opt, log_alpha, alpha_opt), (s.actor, s.actor_opt, s.log_alpha, s.alpha_opt))
     target_net = jax.tree.map(lambda t, c: (1.0 - cfg.tau) * t + cfg.tau * c, s.target, critic)
     metrics = {"critic_loss": c_loss, "actor_loss": a_loss, "alpha": alpha, "entropy": -jnp.mean(logp), "q": jnp.mean(q)}
     return TQCState(actor, critic, target_net, log_alpha, actor_opt, critic_opt, alpha_opt, s.updates + 1), metrics

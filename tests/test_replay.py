@@ -85,3 +85,14 @@ def test_samples_start_on_valid_steps_and_stay_inside_the_written_window():
                 k, disc = j + 1, 0.0
                 break
         assert np.isclose(float(b.reward[i]), ret, rtol=1e-5) and np.isclose(float(b.discount[i]), disc, rtol=1e-5)
+
+
+def test_a_batch_with_no_valid_step_is_flagged():
+    buf = rp.new(16, 2, 3, 1)
+    for _ in range(10):
+        buf = rp.add(buf, jnp.ones((2, 3)), jnp.zeros((2, 1)), jnp.ones(2), jnp.zeros(2, bool), jnp.zeros(2, jnp.int8))
+    assert not bool(rp.sample(buf, jax.random.PRNGKey(0), 8, 3, G).ok)
+    buf = rp.add(buf, jnp.ones((2, 3)), jnp.zeros((2, 1)), jnp.ones(2), jnp.ones(2, bool), jnp.zeros(2, jnp.int8))
+    for _ in range(4):
+        buf = rp.add(buf, jnp.ones((2, 3)), jnp.zeros((2, 1)), jnp.ones(2), jnp.ones(2, bool), jnp.zeros(2, jnp.int8))
+    assert bool(rp.sample(buf, jax.random.PRNGKey(0), 8, 3, G).ok)

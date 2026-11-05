@@ -7,7 +7,8 @@ The amounts are kept per term so each one's share of a profile's reward can be l
 | Term | Amount per step | Base | Style |
 |---|---|---|---|
 | progress | steps' worth of reference pace: metres along the centreline / (the lap simulation's speed there, or the speed limit if lower, x 0.05 s), while the car's centre is on the track | +1 (a step at reference pace) | common |
-| crash | crashes (ends the car's race: no respawn), a contact crash by blame: 0.3 + 0.7 x the car's share of it (f1env: by how fast each car moved towards the other) | -100 | common |
+| crash | crashes (ends the car's race: no respawn), the full cost whoever was to blame: a car hit by another pays it too | -2500 | common |
+| black_flag | disqualified for a 4th warning (ends the car's race) | -2500 | common |
 | sector | each third of a lap driven on the track this race (paid once per third, so going back and forth doesn't farm it) | +10 | common |
 | sc_close | seconds closer than 0.5 s behind the car ahead while the safety car is called or out (queues that squeeze up end in chains of rear-ends) | -5 | common |
 | warning | warnings (the 4th is a black flag, which ends it) | -50 | common |
@@ -48,9 +49,14 @@ change. (Until 2026-10-31 it paid per metre, +1 for a step at the 310 km/h top s
 the safety car.) Tyre wear is charged only beyond what the compound's rated life allows for the distance, so the cost
 is for wearing tyres harder than nominal, not a tax on every metre.
 
-A contact crash costs each car by its share of the blame (f1env's, from how fast each car moved towards the other at
-contact): the car that drove into the other, or into a wreck, pays the full cost; the car it hit 30%. Both lose their
-episode, but the one hit couldn't have learned much from the full cost. Crashes with no other car pay the full cost.
+A crash or a black flag costs -2500 (since 2026-11-05; the crash was -100), far more than anything a car can gain
+over its ~8 s horizon: at -100 the drivers rated +1% of pace as worth ~6 points more crash risk per lap, and crashed on
+15-25% of laps. Every car in a contact crash pays the full cost, the one hit too, so drivers keep out of trouble even
+when it costs a place. The black flag costs as much as a crash, so it's never a cheaper way out (it was the 4th
+warning's -50). The stuck rule (6 s stopped) and hitting the safety car count as crashes.
+
+The weighted sum is multiplied by `scale` ([rewards] in drivers.toml, 0.1), so the critics' targets stay around
+-250 to +12 while the base values read in their own units.
 
 f1env has no track limits (run-off only has less grip), and progress is measured along the centreline, so a driver can
 gain by cutting a corner across the run-off; Middle learned to cut the inside of esses. So progress made with the car's
@@ -66,14 +72,13 @@ import jax.numpy as jnp
 import numpy as np
 
 TOP_SPEED = 86.1  # m/s, the stock car's (310 km/h)
-CRASH_VICTIM = 0.3  # a car hit by another pays this share of the crash cost; the rest goes by its share of the blame
-TERMS = ("progress", "crash", "warning", "bump", "pit", "dead_tyre", "finish", "off_track", "overtake", "place_lost", "holding", "inside_line", "tyre_wear", "inputs", "slip", "quali_place", "quali_q2", "quali_q3", "quali_lap", "standstill", "sector", "sc_close")
+TERMS = ("progress", "crash", "warning", "bump", "pit", "dead_tyre", "finish", "off_track", "overtake", "place_lost", "holding", "inside_line", "tyre_wear", "inputs", "slip", "quali_place", "quali_q2", "quali_q3", "quali_lap", "standstill", "sector", "sc_close", "black_flag")
 STYLE = {"overtake": "overtake", "place_lost": "place_lost", "holding": "holding", "inside_line": "inside_line", "tyre_wear": "tyre_wear", "inputs": "smoothness", "slip": "smoothness"}
 STYLES = ("overtake", "place_lost", "holding", "inside_line", "tyre_wear", "smoothness")
 
 BASE = {
     "progress": 1.0,
-    "crash": -100.0,
+    "crash": -2500.0,
     "warning": -50.0,
     "bump": -2.0,
     "pit": 5.0,
@@ -94,6 +99,7 @@ BASE = {
     "standstill": -20.0,
     "sector": 10.0,
     "sc_close": -5.0,
+    "black_flag": -2500.0,
 }
 HOLD_S = 2.0  # an overtake counts once the place has been held this long
 STOPPED_SPEED = 1.0  # m/s: slower than this counts as standing still
@@ -141,11 +147,11 @@ def new_memory(place):
     return Memory(jnp.zeros_like(place), jnp.zeros_like(place), place, jnp.zeros(place.shape, jnp.float32), jnp.zeros_like(place))
 
 
-def weights(base: dict | None = None, styles: dict | None = None) -> np.ndarray:
-    """(terms,) base value x the profile's multiplier for each term's style."""
+def weights(base: dict | None = None, styles: dict | None = None, scale: float = 1.0) -> np.ndarray:
+    """(terms,) base value x the profile's multiplier for each term's style, x `scale` (the reward scale)."""
     base = {**BASE, **(base or {})}
     styles = styles or {}
-    return np.array([base[t] * styles.get(STYLE[t], 1.0) if t in STYLE else base[t] for t in TERMS], np.float32)
+    return np.array([scale * (base[t] * styles.get(STYLE[t], 1.0) if t in STYLE else base[t]) for t in TERMS], np.float32)
 
 
 def _bits(x, n: int = 4):
@@ -200,7 +206,7 @@ def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: fl
     slip = dyn.wheelspin + dyn.lockup_front + dyn.lockup_rear + dyn.slide_front + dyn.slide_rear  # drifting costs too
     parts = {
         "progress": on_track / ((TOP_SPEED if pace is None else pace) * dt),  # no progress off the track: cutting doesn't pay
-        "crash": events.crashed * (CRASH_VICTIM + (1.0 - CRASH_VICTIM) * events.crash_blame),
+        "crash": events.crashed,  # the full cost, whoever was to blame
         "warning": _bits(events.warned),
         "bump": events.bump,
         "pit": events.pit_in,
@@ -219,6 +225,7 @@ def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: fl
     parts["standstill"] = zero if stopped is None else stopped * dt
     parts["sector"] = sector_paid
     parts["sc_close"] = zero if close is None else close * dt
+    parts["black_flag"] = events.black_flag
     if quali is None:
         parts.update(quali_place=zero, quali_q2=zero, quali_q3=zero, quali_lap=zero)
     else:

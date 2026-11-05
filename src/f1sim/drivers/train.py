@@ -110,6 +110,10 @@ def main(argv=None):
     if init:
         base, info = checkpoint.load(init, template, s.tqc)
         agent = tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha)
+        factor = s.reward_scale / float(info.get("reward_scale", 1.0))  # checkpoints before the reward scale: 1
+        if factor != 1.0:
+            agent = tqc.rescale(agent, factor)
+            print(f"{s.profile}: rewards x{factor:g} since that checkpoint: critics and alpha rescaled")
         warmup = 0
         print(f"{s.profile}: starting from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)")
     else:
@@ -119,7 +123,7 @@ def main(argv=None):
     warmup_steps = warmup // slots  # random actions
     learn_from = max(int(sa["warmup"]) // slots, s.tqc.batch // slots + s.tqc.n_step + 1)  # a started profile drives its own policy meanwhile
     w = jnp.asarray(s.weights)
-    meta = {"profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION, "styles": s.styles, "drop": s.tqc.drop, "gamma": s.tqc.gamma, "target_entropy": s.tqc.target_entropy, "init": init}
+    meta = {"reward_scale": s.reward_scale, **checkpoint.provenance(), "profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION, "styles": s.styles, "drop": s.tqc.drop, "gamma": s.tqc.gamma, "target_entropy": s.tqc.target_entropy, "init": init}
     print(f"{s.profile}: d={s.tqc.drop} ({s.tqc.drop * s.tqc.critics} of {s.tqc.critics * s.tqc.quantiles} atoms dropped)  H0={s.tqc.target_entropy}  gamma={s.tqc.gamma}  {p['races']} races x 1 car  replay {p['replay']:,}")
 
     steps = jnp.zeros((), jnp.int32)

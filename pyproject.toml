@@ -28,6 +28,7 @@ f1sim-eval = "f1sim.drivers.evaluate:main"
 f1sim-season = "f1sim.drivers.season:main"
 f1sim-watch = "f1sim.drivers.watch:main"
 f1sim-check-tqc = "f1sim.pendulum:main"
+f1sim-plot = "f1sim.drivers.plot:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

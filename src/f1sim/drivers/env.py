@@ -72,6 +72,8 @@ class EnvConfig(NamedTuple):
     release_gap: float = 4.0  # s between cars leaving the garage
     quali_wet_share: float = 0.1
     race: RaceConfig = RaceConfig(respawn=True)
+    learners: tuple = ()  # (C,) the cars that keep a race going ((): every car); stage B: the learning seats, so a
+    # race whose learners are all out restarts at once instead of waiting for its frozen cars
 
 
 class EnvState(NamedTuple):
@@ -97,7 +99,8 @@ class Out(NamedTuple):
     slipping: jax.Array  # (R, C) wheelspin or a lock-up
     metres: jax.Array  # (R, C) progress along the centreline on the track (the progress term pays it against the pace)
     wear: jax.Array  # (R, C) % of tyre life used (the tyre_wear term charges only what's beyond the rated wear)
-    crashed: jax.Array  # (R, C) a crash (the crash term weighs a contact crash by blame)
+    crashed: jax.Array  # (R, C) a crash
+    hit: jax.Array  # (R, C) a contact crash the car was mostly not to blame for (f1env's blame under a half)
 
 
 def to_race_actions(a) -> RaceActions:
@@ -232,12 +235,14 @@ def controlled(race):
 def race_done(bank, race, limit, cfg: EnvConfig):
     """(R,) nothing left to race: no car running or about to rejoin, past the time limit, or the flag is out and only
     cars that already crashed (and rejoined) are still going. A rejoined car can't finish, so it stops counting once it
-    has covered the race distance."""
+    has covered the race distance. With `cfg.learners`, only those cars count as running or rejoining."""
     running = race.status == RACING
     rejoining = cfg.race.respawn & race.dnf & ~race.flags.black & ((race.status == WRECK) | (race.status == OUT))
     laps = jnp.floor(race.line / bank.length[race.tid][:, None])
     through = running & race.dnf & (laps >= race.target_laps[:, None])
     going = (running & ~through) | rejoining
+    if cfg.learners:
+        going = going & jnp.asarray(cfg.learners, bool)[None, :]
     return ~jnp.any(going, axis=-1) | (race.clock >= limit) | (race.flag & ~jnp.any(running & ~race.dnf, axis=-1))
 
 
@@ -288,6 +293,7 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
         "crashes": jnp.sum(valid & ev.crashed),
         "finishes": jnp.sum(valid & ev.finished),
         "black_flags": jnp.sum(valid & ev.black_flag),
+        "hit": jnp.sum(valid & ev.crashed & ev.crash_car & (ev.crash_blame < 0.5)),
         "laps": jnp.sum(valid & ev.lap_done),
         "laps_counted": jnp.sum(valid & ev.lap_counted),
         "lap_ratio": jnp.sum(jnp.where(valid & ev.lap_counted, ev.lap_time / ref, 0.0)),
@@ -303,6 +309,7 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
     out = Out(
         amounts, valid, end, valid & ev.lap_done, valid & ev.records.under_attack, jnp.where(valid, ev.records.lost, 0), valid & slipping,
         jnp.where(valid & ~ev.off_track, ev.progress, 0.0), jnp.where(valid, ev.tyre_wear * 100.0, 0.0), valid & ev.crashed,
+        valid & ev.crashed & ev.crash_car & (ev.crash_blame < 0.5),
     )
     return (nxt, obs, out, info, ev) if events else (nxt, obs, out, info)
 

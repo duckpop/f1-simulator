@@ -49,6 +49,8 @@ f1sim-train-b --tracks tracks --init smooth=runs/middle/stage-b/best.npz   # one
 f1sim-train-b --tracks tracks --profiles middle --out runs/together --init middle=runs/middle/stage-a/best.npz --replay 2000000
                                                   # one profile on the full grid: 16 learning, 6 frozen earlier copies
 f1sim-season --tracks tracks                      # Phase 2's evaluation and the comparison with v2
+python -m f1sim.drivers.plot runs/together5 runs/together6 --out runs/compare.png
+                                                  # stage B curves, runs overlaid at matching steps (an A/B)
 ```
 
 Without a pool, `--generate N` makes N training tracks on the spot (and the eval tracks from their seeds), for small
@@ -103,7 +105,8 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
   "deploy".
 - A crash ends the episode and the car is out for the rest of its race (`[env] respawn = false` since 2026-11-01, so
   a crash isn't just a short setback; with it on, the car rejoins from the pit exit ~5 s later as a new episode). A race that's over, or past 2.5x its lap-simulation time, restarts at once on a new track, inside the
-  compiled step; the cars still going are cut there (bootstrapped).
+  compiled step; the cars still going are cut there (bootstrapped). In stage B only the learning cars keep a race
+  going (`learners`): once they're all out it restarts, rather than waiting for the frozen cars.
 - The replay stores each step once per car (inputs in float16) with whether the driver was in control and how the step
   ended; n-step returns and the next inputs are found when sampling (`src/f1sim/replay.py`).
 
@@ -125,9 +128,19 @@ contact, the safety car and blue flags.
   environment step.
 - The snapshot pool (8) starts with the four stage A bests and takes a copy of one profile's current actor, in turn,
   every 100k steps. A frozen car drives one snapshot (its mean action) for a whole session.
-- Each profile's target entropy is 1 lower than in stage A (`entropy_shift`): less action noise. With stage A's
-  noise a driver's tyres lasted half as long as without it (more wheelspin and lock-ups), so training drove quite
-  unlike the noise-free eval.
+- Each profile's target entropy is 5 lower than in stage A (`entropy_shift`; Middle's H0 -7): less action noise. With
+  stage A's noise a driver's tyres lasted half as long as without it, and at -1 lower the noisy learners of
+  together5 crashed 3-5x as often per lap as frozen copies of their starting networks driving the mean action (in
+  together4 about as often: the noise is a suspect, not proven).
+- A quarter of each profile's learning seats go to its replay (`store_share`), so the same buffer covers ~26 minutes
+  of racing instead of ~6.5; a batch draws 16 candidate rows per sample, and a batch with no step the driver
+  controlled is skipped rather than learned from.
+- Starting from a checkpoint of the same shape, the optimisers carry on; one saved under another reward scale has its
+  critics' outputs and alpha rescaled. Learning starts after `warmup_steps` (2,000) environment steps, and the critics
+  learn alone for the first `critic_warmup` (30,000) gradient steps, so they price this run's rewards before the actor
+  follows them.
+- A log line every 1,000 steps per group: the share of its seats alive, crashes (per lap, and how many it was hit
+  in), black flags, laps, overtakes, and for a learning profile its reward per step (scaled), Q, alpha and entropy.
 - 20% of sessions are 12-minute qualifying sessions: every car starts in its garage and goes out twice on new softs
   (f1env's default runs), so flying laps and the "session" input get learned. A run ends when the car parks.
 - The eval is a full weekend on every eval track, as in F1: Q1, Q2 and Q3 set the grid, then a 50-lap race (`eval_laps`),
@@ -137,10 +150,15 @@ contact, the safety car and blue flags.
   same from eval to eval and run to run, and a profile can't look better because another got worse. Reported: points
   per race, the distance completed, the reward per step under the profile's own weights, finish rate, out on lap 1,
   crashes per lap, time off the track, overtakes, places lost and attacks held; then each profile alone on the eval
-  tracks for 5 laps (`solo_laps`): pace, tyre life, crashes apart from the field. Each profile keeps its best
-  checkpoint (`evaluate.better_mixed`: more than 0.1 more points per race against the reference, else the distance
-  completed, else its reward per step) in `runs/<profile>/stage-b/best.npz`. It runs every `eval_every_b` steps (50k
-  on the laptop). Bests from evals before 2026-10-31 measured other things and aren't a bar for the new ones.
+  tracks for 20 laps (`solo_laps`): pace, tyre life, crashes apart from the field. Both report incidents (crashes and
+  black flags) per 100 km on the track with a 95% interval. Each profile keeps its best checkpoint
+  (`evaluate.better_mixed`: fewer incidents per 100 km in the race beyond the noise; within it, more than 0.1 more
+  points per race against the reference, else the distance completed, else its reward per step) in
+  `runs/<profile>/stage-b/best.npz`. It runs every `eval_every_b` steps (50k on the laptop). Bests from evals before
+  2026-11-05 measured other things and aren't a bar for the new ones. A new run should start from `latest.npz`: a
+  best picked from noisy evals is partly luck.
+- Checkpoints and the log's start record carry the git commit, whether the code had uncommitted changes, and a hash
+  of the configs.
 
 ## Watching a driver
 
@@ -193,13 +211,15 @@ a quicker look.
 ## Rewards
 
 `src/f1sim/drivers/rewards.py`. Each term is measured in its own unit and weighted by its base value
-(`[rewards]` in `configs/drivers.toml`) times the profile's multiplier for style terms. Every term is logged
+(`[rewards]` in `configs/drivers.toml`) times the profile's multiplier for style terms; the sum is multiplied by
+`scale` (0.1), so the critics see a crash as -250. Every term is logged
 separately (`runs/<profile>/stage-a/log.jsonl`).
 
 | Term | Base | Middle | Aggressive | Smooth | Defensive |
 |---|---|---|---|---|---|
 | Progress, on the track, against the reference pace (the lap simulation's speed there, or the speed limit if lower) | +1 per step at reference pace | | | | |
-| Crash (ends the episode and the car's race); a contact crash x (0.3 + 0.7 x the car's share of the blame) | -100 | | -70 | -230 | -150 |
+| Crash (ends the episode and the car's race); every car in a contact crash pays it in full, the one hit too | -2500 | | -2000 | -2500 | -3000 |
+| Black flag (the 4th warning; ends the car's race) | -2500 | | | | |
 | Sector: each third of a lap driven on the track this race (once each) | +10 | | | | |
 | Closer than 0.5 s behind the car ahead with the safety car called or out | -5 per s | | | | |
 | Warning (the 4th is a black flag) | -50 | | | | |

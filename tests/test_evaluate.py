@@ -33,3 +33,23 @@ def test_stage_b_prefers_points_against_the_reference_then_distance():
     assert evaluate.better_mixed(a, {**a, "points_per_race": 5.05, "distance": 0.7})  # within 0.1 points: the distance
     assert evaluate.better_mixed(a, {**a, "points_per_race": 4.95, "reward_per_step": 0.4}) and not evaluate.better_mixed(a, a)
     assert evaluate.better_mixed(a, {"points_per_race": 9.0, "finish_rate": 1.0, "crashes_per_lap": 0.0})  # an older eval
+
+
+def test_incidents_per_100km_with_an_interval():
+    import json
+
+    r = evaluate.incidents(np.float32(10), np.float32(500.0))  # numpy inputs, as the tallies give them
+    json.dumps(r)
+    assert np.isclose(r["incidents_per_100km"], 2.0)
+    lo, hi = r["incidents_ci"]
+    assert 0.9 < lo < 2.0 < hi < 3.8  # the exact Poisson interval for 10 is 4.80-18.39 events
+    assert evaluate.incidents(0, 100.0)["incidents_ci"][0] == 0.0
+
+
+def test_the_safer_driver_wins_beyond_the_noise():
+    base = {"eval_version": evaluate.EVAL_VERSION, "points_per_race": 5.0, "distance": 0.5, "reward_per_step": 0.05}
+    safe = {**base, **evaluate.incidents(5, 1000.0), "points_per_race": 2.0}
+    risky = {**base, **evaluate.incidents(40, 1000.0), "points_per_race": 8.0}
+    assert evaluate.safer(safe, risky) == -1 and evaluate.better_mixed(safe, risky) and not evaluate.better_mixed(risky, safe)
+    close = {**base, **evaluate.incidents(6, 1000.0), "points_per_race": 6.0}
+    assert evaluate.safer(close, safe) == 0 and evaluate.better_mixed(close, safe)  # within the noise: the points decide
