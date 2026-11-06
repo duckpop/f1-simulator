@@ -24,7 +24,8 @@ crash = -2500.0             # the full cost for every car in a contact crash, th
 black_flag = -2500.0        # disqualified (the 4th warning): as much as a crash, so never a cheaper way out
 sector = 10.0               # each third of a lap driven on the track, once
 sc_close = -5.0             # per second closer than 0.5 s behind the car ahead with the safety car called or out
-warning = -50.0
+warning = -2500.0           # x 0.25 / 0.5 / 0.75 for the 1st / 2nd / 3rd warning (since 2026-11-06; was -50 each):
+                            # with the 4th's black flag a disqualification costs 250% of a crash
 bump = -2.0
 pit = 5.0                   # entering the pit lane on a call
 dead_tyre = -2.0            # per second on a dead tyre
@@ -72,6 +73,10 @@ store_share = 0.25          # learning seats stored in the replay (a quarter: th
 eval_reference = "runs/reference/middle-together-250k.npz"   # the eval's fixed field in the odd cars ("none": off): a
                             # driver that has raced in traffic (stage A's best crashed on lap 1 in 89-98% of its cars)
 solo_laps = 20              # each eval also runs every profile alone on the eval tracks for this many laps
+field_sizes = [6, 12, 18, 22] # cars per session, one drawn per session (the learning seats keep their 16/22 share):
+                            # fewer cars, fewer pile-ups; v2 trained on 3-car races (since 2026-11-06; was always 22)
+spread_share = 0.5          # races that start with the cars spread around the lap at speed (the rest: on the grid),
+spread_speed = [0.6, 0.9]   # ... each at this x the reference pace where it starts: racing without a lap-1 pile-up
 entropy_shift = -5.0        # each profile's target entropy (H0) in stage B is this much lower: less action noise, so
                             # training drives closer to the noise-free eval (at -1 together5's noisy learners crashed
                             # 3-5x as often per lap as frozen copies of their start driving the mean action)

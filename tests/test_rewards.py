@@ -188,3 +188,23 @@ def test_too_close_behind_under_the_safety_car():
     a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
     out, _ = rw.amounts(events(), a, a, rw.new_memory(jnp.full((1, 1), 5)), jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool), close=jnp.ones((1, 1), bool))
     assert np.isclose(float(out[0, 0, TERM["sc_close"]]), 0.05)
+
+
+def test_warnings_cost_a_growing_share_of_a_black_flag():
+    """The 1st, 2nd and 3rd warnings cost 25%, 50% and 75% of a black flag; the 4th is the black flag itself, so a
+    disqualification costs 250% of it in all."""
+    i = lambda x: jnp.full((1, 1), x, jnp.int32)
+    share = lambda bits, before: float(rw.warning_shares(i(bits), i(before))[0, 0])
+    assert [share(1, k) for k in range(4)] == [0.25, 0.5, 0.75, 0.0]
+    assert share(1 | 4, 1) == 1.25  # two at once: the 2nd and the 3rd
+    assert share(0, 2) == 0.0
+    w = rw.weights()
+    assert w[TERM["warning"]] == w[TERM["black_flag"]]
+    total = sum(share(1, k) for k in range(4)) * w[TERM["warning"]] + w[TERM["black_flag"]]
+    assert total == 2.5 * w[TERM["black_flag"]]
+
+    a = SimpleNamespace(steer=jnp.zeros((1, 1)), throttle=jnp.zeros((1, 1)), brake=jnp.zeros((1, 1)))
+    ev = events()
+    ev.warned = i(1)
+    out, _ = rw.amounts(ev, a, a, rw.new_memory(jnp.full((1, 1), 5)), jnp.ones((1, 1), bool), jnp.zeros((1, 1), bool), warned_before=i(1))
+    assert float(out[0, 0, TERM["warning"]]) == 0.5

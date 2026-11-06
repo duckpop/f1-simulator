@@ -99,6 +99,10 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
   marked as cut in the replay). The track data is padded to fixed sizes, so a swap doesn't recompile the training step.
 - Each race: a random track of the active set, 5 laps up to the full 305 km (half of them long enough to need a pit stop),
   a random grid slot, a standing start, f1env's weather (rain in 20% of races).
+- Stage B (since 2026-11-06): each session draws its field, 6, 12, 18 or 22 cars (`field_sizes`; the others are out
+  from the start, the learning seats keep their share and the stored ones race first), and half the races
+  (`spread_share`) start with the cars spread around the lap at 0.6-0.9x the reference pace, lights out, in a random
+  order, instead of a standing start on the grid.
 - Every car gets random upgrade levels each race (each category 0-10, per car).
 - **The training principal** (`principal.py`) boxes each stint at a tyre life drawn from 8-12%, for the next-harder
   compound; wets a lap before rain, slicks a lap before the track is dry enough; pace normal, no team orders, ERS
@@ -118,8 +122,13 @@ from its best stage A networks with their own settings and rewards. The eval at 
 wide copies that fit (at 26 m only 2 of the 10 do, at 20 m 5), each run more times so every width's eval has as many
 races; if none fit, it runs on the normal ones.
 
-**Stage B** (`stage_b.py`): 22 cars per race on the 12-15 m tracks, with overtaking, dirty air, slipstream, DRS,
+**Stage B** (`stage_b.py`): up to 22 cars per race on the 12-15 m tracks, with overtaking, dirty air, slipstream, DRS,
 contact, the safety car and blue flags.
+
+- Fields of 6 to 22 cars, and half the races from spread starts (above): with every race a 22-car standing start
+  (to together6, 2026-11-06) the learners lasted ~1.8 laps, mostly lap-1 pile-ups and the safety car periods they
+  bring, where nearly every black flag came from (speeding under it); their driving got worse (lone wall crashes ~6x
+  the reference driver's). v2 trained on 3-car races.
 
 - Seats are fixed by car number (the grid is random every race): 4 cars of each profile learn (16), team-mates are
   different profiles, and the other 6 cars (27%) drive frozen snapshots.
@@ -222,7 +231,7 @@ separately (`runs/<profile>/stage-a/log.jsonl`).
 | Black flag (the 4th warning; ends the car's race) | -2500 | | | | |
 | Sector: each third of a lap driven on the track this race (once each) | +10 | | | | |
 | Closer than 0.5 s behind the car ahead with the safety car called or out | -5 per s | | | | |
-| Warning (the 4th is a black flag) | -50 | | | | |
+| Warning: the 1st, 2nd and 3rd cost 25%, 50% and 75% of a black flag, so a disqualification costs 250% of one in all (since 2026-11-06; was -50 each) | -625 / -1250 / -1875 | | | | |
 | Bump (under 20 km/h) | -2 | | | | |
 | Pit lane entered on a call | +5 | | | | |
 | Dead tyre | -2 per s | | | | |

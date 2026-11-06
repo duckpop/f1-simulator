@@ -143,3 +143,53 @@ def test_mixed_sessions(bank):
     assert 0.1 < is_q.mean() < 0.3
     assert (np.asarray(st.race.clock)[is_q] == 0).all() and (np.asarray(st.race.clock)[~is_q] < 0).all()  # garages / lights
     assert np.isinf(np.asarray(st.plan)[~is_q]).all() and np.isfinite(np.asarray(st.plan)[is_q]).all()
+
+
+def test_field_sizes(bank):
+    """Each session draws its field size; the learning seats keep their share (the kept ones first), the cars taking
+    part get the front grid slots, and the others are out from the start (never valid)."""
+    learners = tuple(k < 16 for k in range(22))
+    keep = tuple(k < 4 for k in range(22))
+    cfg = de.EnvConfig(races=64, cars=22, field_sizes=(6, 12, 18, 22), learners=learners, keep=keep, race=de.RaceConfig(respawn=False))
+    present = np.asarray(de.field(jax.random.PRNGKey(5), cfg))
+    n = present.sum(axis=1)
+    assert set(n) == {6, 12, 18, 22}
+    n_learn = present[:, :16].sum(axis=1)
+    assert (n_learn == np.round(n * 16 / 22)).all()
+    assert present[:, :4].all()  # the kept seats always race
+    st, _ = jax.jit(partial(de.reset, cfg=cfg))(bank, jax.random.PRNGKey(6))
+    status = np.asarray(st.race.status)
+    racing = status == RACING
+    assert ((status == RACING) | (status == OUT)).all()
+    assert set(racing.sum(axis=1)) <= {6, 12, 18, 22}
+    st2, (_, valid, *_rest) = run(bank, cfg, st, jnp.zeros((200, 64, 22, 5)))
+    assert not np.asarray(valid)[:, ~racing].any()
+    # the cars taking part fill the front grid slots: the field reaches back only as far as its size
+    grid = np.asarray(bank.grid)[np.asarray(st.race.tid)]  # (R, 22, 3)
+    x, y = np.asarray(st.race.cars.x), np.asarray(st.race.cars.y)
+    for r in range(8):
+        d = np.hypot(x[r][racing[r], None] - grid[r, None, :, 0], y[r][racing[r], None] - grid[r, None, :, 1])
+        assert d.argmin(axis=1).max() == racing[r].sum() - 1
+    assert de.field(jax.random.PRNGKey(0), de.EnvConfig(races=2, cars=22)).all()  # no sizes: everyone
+
+
+def test_spread_starts(bank):
+    """A spread start puts the cars around the lap at speed, apart from each other, the lights out: they're driving
+    (valid) from the first step, short of the line, and the first crossing starts lap 1."""
+    cfg = de.EnvConfig(races=8, cars=12, spread_share=1.0, spread_speed=(0.6, 0.9), race=de.RaceConfig(respawn=False))
+    st, obs = jax.jit(partial(de.reset, cfg=cfg))(bank, jax.random.PRNGKey(7))
+    race = st.race
+    assert (np.asarray(race.clock) >= np.asarray(race.lights_out)).all()
+    speed = np.asarray(race.cars.vx)
+    assert (speed > 5.0).all()
+    length = np.asarray(bank.length)[np.asarray(race.tid)][:, None]
+    line = np.asarray(race.line)
+    assert ((line < 0) & (line >= -length - 1.0)).all()
+    s = np.sort(np.asarray(race.s), axis=1)
+    gaps = np.diff(np.concatenate([s, s[:, :1] + length], axis=1), axis=1)
+    assert (gaps > 0.3 * length / 12 - 1.0).all()  # evenly spread, each moved by under a third of the spacing
+    assert np.isfinite(np.asarray(obs)).all()
+    a = jnp.zeros((40, 8, 12, 5)).at[..., 1].set(0.3)  # a little throttle, straight on
+    _, (obs2, valid, *_rest) = run(bank, cfg, st, a)
+    assert np.asarray(valid)[0].all()
+    assert np.isfinite(np.asarray(obs2)).all()

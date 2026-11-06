@@ -12,6 +12,12 @@
   slot waits.
 - Stage B: a share of the sessions (`quali_share`) are short qualifying sessions instead of races: every car in its
   garage, out twice on new softs (f1env's default two runs), the flag after `quali_s` seconds.
+- Field sizes (`field_sizes`, stage B since 2026-11-06): each session draws how many cars take part (e.g. 6, 12, 18 or
+  22); the others are out (f1env's OUT: not on the track, not seen, not stored). The learning seats keep their share of
+  the field, the `keep` cars (stage B: the seats the replay stores) first, and the cars in it fill the front slots.
+- Spread starts (`spread_share` of the races): the cars start spread around the lap at speed (`spread_speed` x the
+  reference pace there) in a random order, lights already out, instead of standing on the grid: racing in traffic
+  without a lap-1 pile-up (v2 had the same, its "random" spawn). Each car's first, partial lap isn't timed.
 
 Per car and step it gives what the replay needs: `valid` (the driver was in control before the step: the race had
 started, the car was running and not parked in its garage; the pit lane counts, as the car is still in the race), `end`
@@ -37,7 +43,9 @@ import jax.numpy as jnp
 from f1env import observe
 from f1env import pits as pt
 from f1env.principal import quali_orders, quali_plan
-from f1env.race import OUT, QUALIFYING, RACING, WRECK, RaceActions, RaceConfig, RaceState, pit_orders, race_step, start_race
+from f1env import racecontrol as rc
+from f1env.race import OUT, QUALIFYING, RACING, WRECK, RaceActions, RaceConfig, RaceState, _start_timing, pit_orders, race_step, start_race
+from f1env.sensors import locate_global
 from f1env.upgrades import random_levels
 from f1env.weekend import start_qualifying
 
@@ -74,6 +82,11 @@ class EnvConfig(NamedTuple):
     race: RaceConfig = RaceConfig(respawn=True)
     learners: tuple = ()  # (C,) the cars that keep a race going ((): every car); stage B: the learning seats, so a
     # race whose learners are all out restarts at once instead of waiting for its frozen cars
+    field_sizes: tuple = ()  # cars per session, one drawn per session ((): every car)
+    keep: tuple = ()  # (C,) cars that take part whenever their group (learning / frozen) has room, before the others
+    spread_share: float = 0.0  # races that start spread around the lap at speed instead of on the grid
+    spread_speed: tuple = (0.6, 0.9)  # x the reference pace where a spread car starts
+    spread_lateral: float = 1.0  # m, at most, off the centreline
 
 
 class EnvState(NamedTuple):
@@ -156,18 +169,26 @@ def new_races(bank, key, cfg: EnvConfig, tid=None, pick=None):
     tid = jnp.asarray(tid, jnp.int32)
     laps = race_laps(bank, tid, k_laps, cfg)
     setup = random_levels(k_up, r, c, per_team=False) if cfg.upgrades else None
+    k_field, k_spread, k_grid = jax.random.split(k_grid, 3)
+    present = field(k_field, cfg)
     if not cfg.random_grid:
         grid = jnp.broadcast_to(jnp.arange(c), (r, c))
     elif c == 1:
         grid = jax.random.randint(k_grid, (r, 1), 0, GRID_SLOTS)
-    else:
-        grid = jnp.argsort(jax.random.uniform(k_grid, (r, c)), axis=-1)
-    race = _strong(principal.fixed_orders(start_race(bank, tid, laps, k_race, cfg.race, c, setup, grid=grid)))
+    else:  # a random order, the cars taking part in the front slots
+        grid = _ranks(jax.random.uniform(k_grid, (r, c)) + 2.0 * ~present)
+    race = start_race(bank, tid, laps, k_race, cfg.race, c, setup, grid=grid)
+    race = race._replace(status=jnp.where(present, race.status, OUT))
+    if cfg.spread_share > 0:
+        k_which, k_place = jax.random.split(k_spread)
+        spread = jax.random.uniform(k_which, (r,)) < cfg.spread_share
+        race = _select(spread, spread_start(bank, race, present, k_place, cfg), race)
+    race = _strong(principal.fixed_orders(race))
     limit = (cfg.time_factor * bank.lap_time[tid] * laps + 60.0).astype(jnp.float32)
     plan = jnp.full((r, c, cfg.quali_runs), jnp.inf, jnp.float32)
     if cfg.quali_share > 0:
         k_start, k_plan, k_kind = jax.random.split(k_quali, 3)
-        taking = jnp.ones((r, c), bool)
+        taking = present
         quali = _strong(principal.fixed_orders(start_qualifying(bank, tid, k_start, taking, cfg.quali_s, cfg.race, setup, cfg.quali_wet_share)))
         is_q = jax.random.uniform(k_kind, (r,)) < cfg.quali_share
         race = _select(is_q, quali, race)
@@ -175,6 +196,67 @@ def new_races(bank, key, cfg: EnvConfig, tid=None, pick=None):
         q_plan = quali_plan(bank, tid, k_plan, taking, cfg.quali_s, cfg.quali_runs, cfg.release_gap)
         plan = jnp.where(is_q[:, None, None], q_plan, plan)
     return race, limit, principal.draw_worn(k_worn, (r, c), cfg.worn), plan
+
+
+def _ranks(x):
+    """(R, C) each car's rank by x along the last axis (0: the smallest)."""
+    return jnp.argsort(jnp.argsort(x, axis=-1), axis=-1)
+
+
+def field(key, cfg: EnvConfig):
+    """(R, C) the cars taking part in each new session: all of them, or with `field_sizes` one size drawn per session.
+    The learning seats (`learners`) keep their share of the field (at least one), the frozen ones fill the rest, and
+    within each group the `keep` cars go first, then a random pick."""
+    r, c = cfg.races, cfg.cars
+    if not cfg.field_sizes or c == 1:
+        return jnp.ones((r, c), bool)
+    k_size, k_pick = jax.random.split(key)
+    sizes = jnp.asarray(cfg.field_sizes, jnp.int32)
+    n = jnp.clip(sizes[jax.random.randint(k_size, (r,), 0, sizes.shape[0])], 1, c)
+    learning = jnp.asarray(cfg.learners if cfg.learners else (True,) * c, bool)
+    keep = jnp.asarray(cfg.keep if cfg.keep else (False,) * c, bool)
+    n_l, n_f = jnp.sum(learning), c - jnp.sum(learning)
+    want_l = jnp.clip(jnp.round(n * n_l / c).astype(jnp.int32), jnp.minimum(1, n_l), n_l)
+    take_f = jnp.clip(n - want_l, 0, n_f)
+    take_l = jnp.minimum(n - take_f, n_l)
+    u = jax.random.uniform(k_pick, (r, c)) - 2.0 * keep
+    rank_l = _ranks(jnp.where(learning, u, jnp.inf))
+    rank_f = _ranks(jnp.where(learning, jnp.inf, u))
+    return jnp.where(learning, rank_l < take_l[:, None], rank_f < take_f[:, None])
+
+
+def spread_start(bank, race: RaceState, present, key, cfg: EnvConfig) -> RaceState:
+    """The races' cars taking part spread around the lap instead of on the grid: evenly spaced (each moved by up to a
+    third of the spacing) in a random order from a random point, up to `spread_lateral` m off the centreline, heading
+    along it at `spread_speed` x the reference pace there, the lights out. Every car is short of the line (as on the
+    grid), so the first crossing starts lap 1; that partial lap isn't timed."""
+    r, c = present.shape
+    k_order, k_jit, k_off, k_lat, k_v, k_ctl = jax.random.split(key, 6)
+    tid = race.tid
+    t = tid[:, None]
+    length = bank.length[tid][:, None]
+    n = jnp.maximum(jnp.sum(present, axis=-1, keepdims=True), 1)
+    order = _ranks(jax.random.uniform(k_order, (r, c)) + 2.0 * ~present)
+    gap = length / n
+    s = (order + jax.random.uniform(k_jit, (r, c), minval=-0.33, maxval=0.33)) * gap + jax.random.uniform(k_off, (r, 1)) * length
+    s = jnp.mod(s, length)
+    idx = jnp.clip(jnp.round(s / bank.ds[t]).astype(jnp.int32), 0, bank.line_n[t] - 1)
+    heading = bank.line_heading[t, idx]
+    lat = jax.random.uniform(k_lat, (r, c), minval=-1.0, maxval=1.0) * cfg.spread_lateral
+    x = bank.line_x[t, idx] - jnp.sin(heading) * lat
+    y = bank.line_y[t, idx] + jnp.cos(heading) * lat
+    v = bank.lap_speed[t, idx] * jax.random.uniform(k_v, (r, c), minval=cfg.spread_speed[0], maxval=cfg.spread_speed[1])
+    on = present
+    old = race.cars
+    cars = old._replace(x=jnp.where(on, x, old.x), y=jnp.where(on, y, old.y), yaw=jnp.where(on, heading, old.yaw), vx=jnp.where(on, v, 0.0))
+    pos = locate_global(bank, jnp.broadcast_to(t, cars.x.shape), cars.x, cars.y)
+    line = jnp.where(on, pos.s - length, race.line)  # short of the line: lap 1 starts at the first crossing
+    sc, flags = rc.new_control(k_ctl, line, cfg.race.control)
+    zero = jnp.zeros_like(race.clock)
+    return race._replace(
+        cars=cars, idx=pos.idx, s=pos.s, line=line, best_line=line, clock=zero, lights_start=zero - cfg.race.lights_s - 1.0, lights_out=zero,
+        lap_valid=jnp.zeros_like(race.lap_valid), sc=sc, flags=flags, timing=_start_timing(bank, tid, pos.s, line, c),
+    )
 
 
 def _inputs(bank, race, readings, prev_edge, last, flags, cfg: EnvConfig):
@@ -269,6 +351,7 @@ def step(bank, s: EnvState, action, key, cfg: EnvConfig, events: bool = False):
     amounts, mem = rewards.amounts(
         ev, acts, s.last, s.mem, valid, ev.respawned, quali=(is_q, race.best_lap, new.best_lap), stopped=stopped, pace=pace, rated_wear=rated,
         sector_len=jnp.broadcast_to(bank.length[race.tid][:, None] / 3.0, valid.shape), close=rewards.too_close(new, ev.gap_ahead),
+        warned_before=race.flags.warnings,
     )
     terminal = valid & (ev.crashed | ev.finished | ev.black_flag)
     over = race_done(bank, new, s.limit, cfg)

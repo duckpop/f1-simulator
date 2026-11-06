@@ -21,6 +21,10 @@
   current actor (in turn), replacing the oldest. A frozen car drives one snapshot (its mean action) for a whole
   session, drawn again when the session restarts.
 - 20% of sessions are short qualifying sessions (`quali_share`), so flying laps and the "session" input are learned.
+- Field sizes and spread starts (since 2026-11-06): each session has 6, 12, 18 or 22 cars (`field_sizes`), and half
+  the races (`spread_share`) start with the cars spread around the lap at speed instead of on the grid. Every race was
+  a 22-car standing start before: the learners lasted ~1.8 laps, mostly in lap-1 pile-ups and the safety car periods
+  they cause, and lost driving skill (together6's lone wall crashes ~6x the reference's). v2 trained on 3-car races.
 - The eval: a full weekend on every eval track (Q1, Q2 and Q3 set the grid, then a race of `eval_laps` laps), the
   default car, no respawn: the even cars the learning profiles in turn, the odd ones (one in every team) a fixed
   reference driver (`eval_reference`, or `--reference`), so points mean the same from eval to eval and a profile can't
@@ -256,9 +260,15 @@ def main(argv=None):
     per = a.per_profile or sb["per_profile"] * len(PROFILES) // len(names)
     seats = seat_layout(CARS, per, len(names))
     # a race restarts once its learners are all out (frozen cars alone don't keep it going)
-    env_cfg = s0.env._replace(races=p["races_b"], cars=CARS, quali_share=sb["quali_share"], quali_s=sb["quali_s"], learners=tuple(bool(x) for x in seats >= 0))
-    R = env_cfg.races
     stored = [stored_seats(seats, i, float(sb.get("store_share", 1.0))) for i in range(len(names))]
+    kept = np.zeros(CARS, bool)
+    kept[np.concatenate(stored)] = True  # in a small field the stored seats race first, so the replay keeps filling
+    env_cfg = s0.env._replace(
+        races=p["races_b"], cars=CARS, quali_share=sb["quali_share"], quali_s=sb["quali_s"], learners=tuple(bool(x) for x in seats >= 0),
+        field_sizes=tuple(int(n) for n in sb.get("field_sizes", ())), keep=tuple(bool(x) for x in kept),
+        spread_share=float(sb.get("spread_share", 0.0)), spread_speed=tuple(float(x) for x in sb.get("spread_speed", (0.6, 0.9))),
+    )
+    R = env_cfg.races
 
     key = jax.random.PRNGKey(a.seed)
     agents, replays, done = [], [], 0
@@ -284,6 +294,8 @@ def main(argv=None):
     pool = stack([agents[k % len(agents)].actor for k in range(K)])
     n_frozen = int((seats < 0).sum())
     print(f"{R} races x {CARS} cars: {per} per profile learning, {n_frozen} frozen ({K} snapshots); {100 * sb['quali_share']:.0f}% qualifying")
+    if env_cfg.field_sizes or env_cfg.spread_share:
+        print(f"fields of {', '.join(map(str, env_cfg.field_sizes or (CARS,)))} cars; {100 * env_cfg.spread_share:.0f}% of races start spread around the lap at {env_cfg.spread_speed[0]:g}-{env_cfg.spread_speed[1]:g} x the reference pace")
 
     # the starting checkpoints' steps in the seed: a run continued from another takes the pool in a new order, not
     # the same first sets again

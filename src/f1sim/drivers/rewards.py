@@ -11,7 +11,7 @@ The amounts are kept per term so each one's share of a profile's reward can be l
 | black_flag | disqualified for a 4th warning (ends the car's race) | -2500 | common |
 | sector | each third of a lap driven on the track this race (paid once per third, so going back and forth doesn't farm it) | +10 | common |
 | sc_close | seconds closer than 0.5 s behind the car ahead while the safety car is called or out (queues that squeeze up end in chains of rear-ends) | -5 | common |
-| warning | warnings (the 4th is a black flag, which ends it) | -50 | common |
+| warning | warnings 1-3, each by its number: the 1st counts 0.25, the 2nd 0.5, the 3rd 0.75 (the 4th is the black flag) | -2500 | common |
 | bump | contacts under 20 km/h | -2 | common |
 | pit | entering the pit lane on a call | +5 | common |
 | dead_tyre | seconds on a tyre at 0% life | -2 | common |
@@ -53,7 +53,9 @@ A crash or a black flag costs -2500 (since 2026-11-05; the crash was -100), far 
 over its ~8 s horizon: at -100 the drivers rated +1% of pace as worth ~6 points more crash risk per lap, and crashed on
 15-25% of laps. Every car in a contact crash pays the full cost, the one hit too, so drivers keep out of trouble even
 when it costs a place. The black flag costs as much as a crash, so it's never a cheaper way out (it was the 4th
-warning's -50). The stuck rule (6 s stopped) and hitting the safety car count as crashes.
+warning's -50). Since 2026-11-06 the warnings before it cost 25%, 50% and 75% of a black flag (they were -50 each):
+almost every black flag was for speeding under the safety car, and with the first three warnings free the drivers
+got no signal until the 4th, so a disqualification now costs 250% of a crash in all. The stuck rule (6 s stopped) and hitting the safety car count as crashes.
 
 The weighted sum is multiplied by `scale` ([rewards] in drivers.toml, 0.1), so the critics' targets stay around
 -250 to +12 while the base values read in their own units.
@@ -79,7 +81,7 @@ STYLES = ("overtake", "place_lost", "holding", "inside_line", "tyre_wear", "smoo
 BASE = {
     "progress": 1.0,
     "crash": -2500.0,
-    "warning": -50.0,
+    "warning": -2500.0,  # x 0.25 / 0.5 / 0.75 for the 1st / 2nd / 3rd warning (`warning_shares`)
     "bump": -2.0,
     "pit": 5.0,
     "dead_tyre": -2.0,
@@ -171,14 +173,29 @@ def too_close(race, gap_ahead):
     return period[:, None] & (speed > 10.0) & (gap_ahead < SC_GAP_S * speed)
 
 
-def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: float = 0.05, quali=None, stopped=None, pace=None, rated_wear=None, sector_len=None, close=None):
+MAX_WARNINGS = 4  # the 4th disqualifies (f1env's race control)
+
+
+def warning_shares(warned, before):
+    """(R, C) the warning term's amount: each warning given this step (`warned` bits) counts its number / 4, the 1st
+    0.25, the 2nd 0.5, the 3rd 0.75; the 4th is the black flag, paid by its own term. before: warnings before the step."""
+    n = _bits(warned)
+    total = jnp.zeros(jnp.shape(n), jnp.float32)
+    for j in range(MAX_WARNINGS):
+        k = before + 1 + j
+        total = total + jnp.where((j < n) & (k < MAX_WARNINGS), k / MAX_WARNINGS, 0.0)
+    return total
+
+
+def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: float = 0.05, quali=None, stopped=None, pace=None, rated_wear=None, sector_len=None, close=None, warned_before=None):
     """(R, C, terms) the amount of each term this step for cars the driver controlled before it, and the new memory.
     actions / last_actions: f1env RaceActions sent this step and the one before. quali: (is_qualifying (R,), best laps
     before the step, after it (R, C)) for the qualifying terms (None: none). stopped: (R, C) standing still on the
     track and not queuing (`standing_still`; None: never). pace: (R, C) the reference speed, m/s (None: the 86.1 m/s
     top speed); rated_wear: (R, C) the tyre life this step's distance uses at the compound's rated life (None: 0);
     sector_len: (R, C) a third of the lap, m (None: no sector term); close: (R, C) under 0.5 s behind the car ahead with
-    the safety car called or out (`too_close`; None: never)."""
+    the safety car called or out (`too_close`; None: never). warned_before: (R, C) each car's warnings before the step
+    (None: none)."""
     rec = events.records
     dyn = events.dynamics
 
@@ -207,7 +224,7 @@ def amounts(events, actions, last_actions, mem: Memory, valid, respawned, dt: fl
     parts = {
         "progress": on_track / ((TOP_SPEED if pace is None else pace) * dt),  # no progress off the track: cutting doesn't pay
         "crash": events.crashed,  # the full cost, whoever was to blame
-        "warning": _bits(events.warned),
+        "warning": warning_shares(events.warned, 0 if warned_before is None else warned_before),
         "bump": events.bump,
         "pit": events.pit_in,
         "dead_tyre": events.tyre_dead * dt,
