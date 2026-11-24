@@ -1,7 +1,8 @@
 #!/bin/bash
-# Cluster step 1 of 3 (2026-11-24): clone or pull f1-simulator and the pinned f1env, a virtual environment with JAX
-# for CUDA, and a few tests on the CPU. Runs on the login node, no GPU needed. Then: cluster_tracks.sh, then
-# sbatch cluster_stage_a.slurm.
+# Cluster setup, once and after every update (2026-11-24): clone or pull f1-simulator and the pinned f1env, a virtual
+# environment with JAX for CUDA, and a few tests on the CPU. Runs on the login node, no GPU needed. Then the three
+# commands: sbatch scripts/cluster_check.slurm (the checker), bash scripts/cluster_tracks.sh (the tracks),
+# sbatch scripts/cluster_train.slurm a|b|c|d (training).
 #
 #   bash cluster_setup.sh
 #
@@ -51,4 +52,4 @@ fi
 # a few tests on the CPU (the GPU is checked at the start of the training job)
 JAX_PLATFORMS=cpu .venv/bin/python -m pytest -q tests/test_config.py tests/test_tqc.py tests/test_replay.py tests/test_rewards.py
 echo
-echo "setup done in $SIM. Next: bash $SIM/scripts/cluster_tracks.sh"
+echo "setup done in $SIM. Next (from $SIM): sbatch scripts/cluster_check.slurm; bash scripts/cluster_tracks.sh; sbatch scripts/cluster_train.slurm a"

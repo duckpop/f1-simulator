@@ -1,6 +1,6 @@
 #!/bin/bash
-# Cluster step 2 of 3 (2026-11-24): generate the track pool on the CPU (500 training + 10 eval tracks, 22 m wide all
-# the way round, as the laptop's pool). No GPU and no job needed. Then: sbatch cluster_stage_a.slurm.
+# Cluster: generate the track pool on the CPU (500 training + 10 eval tracks, 22 m wide all
+# the way round, as the laptop's pool). No GPU and no job needed. Then: sbatch scripts/cluster_train.slurm a.
 #
 #   bash cluster_tracks.sh
 #
@@ -29,4 +29,4 @@ print(f"pool: {n_train} training + {n_eval} eval tracks, width {d.get('width')} 
 assert n_train == 500 and n_eval == 10, "the pool is incomplete"
 E
 echo
-echo "tracks done. Next: cd $SIM && sbatch scripts/cluster_stage_a.slurm"
+echo "tracks done. Next: cd $SIM && sbatch scripts/cluster_train.slurm a"

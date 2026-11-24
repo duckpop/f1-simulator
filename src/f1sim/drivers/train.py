@@ -75,8 +75,9 @@ def main(argv=None):
     ap.add_argument("--tracks", help="track pool directory (f1env-tracks --out ...)")
     ap.add_argument("--generate", type=int, default=0, help="no pool: generate this many training tracks")
     ap.add_argument("--eval-tracks", type=int, default=10, help="eval tracks used (the first n of the 10)")
-    ap.add_argument("--init", help="carry on from this checkpoint (default: from scratch)")
-    ap.add_argument("--steps", type=int, help="override steps_a (environment steps)")
+    ap.add_argument("--init", help="start from this checkpoint (default: from scratch)")
+    ap.add_argument("--resume", action="store_true", help="carry on from runs/middle/stage-a/latest.npz at its step count (after a stop or a time limit)")
+    ap.add_argument("--steps", type=int, help="override steps_a (environment steps in all, resumes included)")
     ap.add_argument("--eval-every", type=int, help="override eval_every (environment steps)")
     ap.add_argument("--patience", type=int, help="override patience (evals without a better one before stopping; 0: never early)")
     ap.add_argument("--rotate-every", type=int, help="override rotate_every (environment steps; 0: keep one set of tracks)")
@@ -100,13 +101,17 @@ def main(argv=None):
         log_file.write(json.dumps(rec) + "\n")
         log_file.flush()
 
-    key = jax.random.PRNGKey(a.seed)
+    start = 0  # the stage's steps before this run (--resume)
+    if a.resume:
+        a.init = str(out / "latest.npz")
+        start = int(checkpoint.meta(a.init).get("env_steps", 0))
+    key = jax.random.PRNGKey(a.seed + start)
     k_agent, key = jax.random.split(key)
     agent = tqc.init(k_agent, s.tqc)
     if a.init:
         base, info = checkpoint.load(a.init, agent)
         agent = tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha)
-        print(f"{s.profile}: carrying on from {a.init} ({info.get('env_steps', 0):,} steps)")
+        print(f"{s.profile}: {'resuming' if a.resume else 'starting'} from {a.init} ({info.get('env_steps', 0):,} steps)")
     slots = p["races"] * s.env.cars
     rows = rp.rows_for(p["replay"], slots)
     replay = rp.new(rows, slots, de.OBS, de.ACTIONS, de.storage_codec())  # inputs packed
@@ -131,7 +136,7 @@ def main(argv=None):
     best = checkpoint.best_bar(out / "best.npz", stage="A", eval_kind="alone", eval_laps=p["eval_laps"], eval_version=evaluate.EVAL_VERSION)
     if best:
         print(f"best so far: {evaluate.summary(best)}")
-    rot = Rotation(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed, generate=bool(a.generate))
+    rot = Rotation(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed + start, generate=bool(a.generate))
     bank = rot.bank
     key, k_reset = jax.random.split(key)
     env_state, obs = de.compiled("reset", s.env)(bank, k_reset, pick=rot.pick)
@@ -142,13 +147,16 @@ def main(argv=None):
     eval_every = a.eval_every or p["eval_every"]
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
     patience = s.stage_a["patience"] if a.patience is None else a.patience
-    next_eval, next_rotate = eval_every, (rotate_every if rot.rotates and rotate_every else None)
+    next_eval, next_rotate = (start // eval_every + 1) * eval_every, (rotate_every if rot.rotates and rotate_every else None)
     stale, t_start, stop = 0, time.time(), StopFlag()
-    while int(carry.steps) < budget and (patience == 0 or stale < patience) and not stop.asked:
+    if start:
+        print(f"resuming at step {start:,} of {budget:,}")
+    while start + int(carry.steps) < budget and (patience == 0 or stale < patience) and not stop.asked:
         t0 = time.time()
         carry, (info, m) = chunk(carry, bank)
         jax.block_until_ready(carry.steps)
-        n = int(carry.steps)
+        here = int(carry.steps)  # this run's steps (the warm start and track rotation count these)
+        n = start + here  # the stage's steps
         rec = chunk_record(info, m, weights, time.time() - t0, p["chunk"], slots)
         log({"kind": "chunk", "env_steps": n, **rec})
         alpha = f"  alpha {rec['alpha']:.3f}  q {rec['q']:7.1f}  H {rec['entropy']:5.2f}" if "alpha" in rec else "  (warming up)"
@@ -157,7 +165,7 @@ def main(argv=None):
             f"crashes {rec['crashes']:3.0f}  laps {rec['laps']:4.0f}  off track {100 * rec['off_track_share']:4.1f}%  races {rec['races']:3.0f}{alpha}",
             flush=True,
         )
-        if next_rotate and n >= next_rotate:  # a fresh set of training tracks
+        if next_rotate and here >= next_rotate:  # a fresh set of training tracks
             next_rotate += rotate_every
             bank, env_state, obs, hit = rotate_races(rot, carry.env, carry.obs.reshape(s.env.races, s.env.cars, de.OBS), jax.random.fold_in(carry.key, n), s.env)
             replay_cut = rp.cut_last(carry.replay, jnp.asarray(np.repeat(hit, s.env.cars)))
@@ -165,7 +173,7 @@ def main(argv=None):
             print(f"  tracks: {rot.describe()}; {int(hit.sum())} races restarted", flush=True)
         if n >= next_eval:
             next_eval += eval_every
-            if n <= plan.actor_from:  # the actor hasn't moved yet: the same driver, the same eval
+            if here <= plan.actor_from:  # the actor hasn't moved yet: the same driver, the same eval
                 continue
             r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], p["eval_seeds"], weights=weights)
             log({"kind": "eval", "env_steps": n, **r})
@@ -179,8 +187,8 @@ def main(argv=None):
                 stale += 1
             note = "  (best)" if improved else (f"  (no better: {stale}/{patience or 'no limit'})" if best["finish_rate"] > 0 else "  (no better; nothing finishes yet)")
             print(f"  eval: {evaluate.summary(r)}{note}", flush=True)
-    checkpoint.save(out / "latest.npz", carry.agent, {**meta, "env_steps": int(carry.steps)})
-    print(f"stage A: {int(carry.steps):,} steps in {(time.time() - t_start) / 60:.1f} min; best eval: {evaluate.summary(best) if best else 'none'}")
+    checkpoint.save(out / "latest.npz", carry.agent, {**meta, "env_steps": start + int(carry.steps)})
+    print(f"stage A: {int(carry.steps):,} steps in {(time.time() - t_start) / 60:.1f} min (the stage at {start + int(carry.steps):,} of {budget:,}); best eval: {evaluate.summary(best) if best else 'none'}")
     log_file.close()
 
 

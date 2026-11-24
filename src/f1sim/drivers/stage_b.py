@@ -500,7 +500,11 @@ def main(argv=None):
     log_file.write(json.dumps({"kind": "start", "argv": argv if argv is not None else sys.argv[1:], "reward_scale": s0.reward_scale, "profiles": list(names), "stage": label, "seats_per_group": [int(x) for x in seats_per_group], **prov}) + "\n")
     if prov.get("dirty"):
         print(f"note: the code has uncommitted changes (git {prov.get('git', '?')[:10]}): this run can't be reproduced from git alone")
-    budget = int(sb.get("steps", 0)) or p["steps_b"]
+    budget = int(sb.get("steps", 0)) or p["steps_b"]  # the stage's environment steps in all, over every resume
+    # --resume carries the step count on (the replay starts empty again, so the warm start runs on the chunk's own count)
+    start = min(checkpoint.meta(outs[s.profile] / "latest.npz").get("env_steps", 0) for s in settings) if a.resume else 0
+    if start:
+        print(f"resuming at step {start:,} of {budget:,}")
     eval_every = int(sb.get("eval_every", 0)) or p["eval_every_b"]
     snap_on = sb.get("snapshot_on", "best")
     if snap_on == "none":
@@ -530,7 +534,7 @@ def main(argv=None):
         print(f"averaged actors ({half:,.0f}-step half-life): the frozen snapshots and the evals")
     else:
         print("no averaged actors: the evals, bests and frozen snapshots take the training actor itself")
-    next_eval = eval_every
+    next_eval = (start // eval_every + 1) * eval_every  # in the stage's own steps (resumes included)
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
     next_rotate = rotate_every if rot.rotates and rotate_every else None
     print(f"training tracks: {rot.describe()}")
@@ -587,7 +591,7 @@ def main(argv=None):
                 checkpoint.save(outs[s.profile] / "best.npz", ag, meta)  # the current actor (the eval drove the averaged one)
                 checkpoint.save(outs[s.profile] / "bests" / f"best-{n}.npz", ag._replace(actor=drivers[i]), {**meta, "actor": "averaged"})
                 slot = oldest_slot(owners, ages, s.profile)
-                if snap_on == "best" and n > 0 and slot is not None:  # step 0's driver is the starting checkpoint
+                if snap_on == "best" and n > start and slot is not None:  # the first eval's driver is the starting checkpoint
                     league = push_snapshot(league, slot, drivers[i])
                     ages[slot] = max(ages) + 1
                     print(f"  pool: the {n:,}-step best into slot {slot} (one of {owners.count(s.profile)} {s.profile} slots)", flush=True)
@@ -616,14 +620,15 @@ def main(argv=None):
 
     if sb.get("eval_first") and any(bar is None for bar in best.values()):  # the starting drivers set the bar
         print("eval at step 0: the starting drivers set the bar", flush=True)
-        league = run_eval(league, 0)
+        league = run_eval(league, start)
     t_start = time.time()
     stop = StopFlag()
-    while int(league.steps) < budget and not stop.asked:
+    while start + int(league.steps) < budget and not stop.asked:
         t0 = time.time()
         league, (stats, metrics) = chunk(league, bank)
         jax.block_until_ready(league.steps)
-        n = int(league.steps)
+        here = int(league.steps)  # this run's steps (the warm start counts these)
+        n = start + here  # the stage's steps
         rec = chunk_record(stats, metrics, names, time.time() - t0, p["chunk"], seats_per_group)
         log_file.write(json.dumps({"kind": "chunk", "env_steps": n, **rec}) + "\n")
         log_file.flush()
@@ -631,7 +636,7 @@ def main(argv=None):
         if avg_share:
             averaged = [average_in(m, ag.actor, avg_share) for m, ag in zip(averaged, league.agents)]
 
-        if revive_on and not revived and n >= learn_from:  # a run's start, once the replay has filled to the warm start's
+        if revive_on and not revived and here >= learn_from:  # a run's start, once the replay has filled to the warm start's
             # level: judged on a sample of the first few seconds of racing, units that fire only later in a race (the safety car,
             # a pit stop) look dead and would lose what they learned (the first try, at 1,000 steps: 1,001 critic units)
             league, averaged = revive_dead(league, averaged, n)
@@ -645,17 +650,17 @@ def main(argv=None):
             print(f"  tracks: {rot.describe()}; {int(hit.sum())} races restarted", flush=True)
         if n >= next_eval:
             next_eval += eval_every
-            if n > plan.actor_from:  # before it the actors haven't moved: the same drivers, the same eval
+            if here > plan.actor_from:  # before it the actors haven't moved: the same drivers, the same eval
                 if revive_on:  # before every eval: the units that died since, and the count for the log
                     league, averaged = revive_dead(league, averaged, n)
                 league = run_eval(league, n)
                 trim_heap()
     for i, (s, ag) in enumerate(zip(settings, league.agents)):
-        meta = {"profile": s.profile, "preset": a.preset, "stage": label, "env_steps": int(league.steps), "reward_scale": s.reward_scale, **prov}
+        meta = {"profile": s.profile, "preset": a.preset, "stage": label, "env_steps": start + int(league.steps), "reward_scale": s.reward_scale, **prov}
         checkpoint.save(outs[s.profile] / "latest.npz", ag, meta)
         if avg_share:
             checkpoint.save(outs[s.profile] / "latest-averaged.npz", ag._replace(actor=averaged[i]), {**meta, "actor": "averaged"})
-    print(f"stage {label}: {int(league.steps):,} steps in {(time.time() - t_start) / 60:.1f} min")
+    print(f"stage {label}: {int(league.steps):,} steps in {(time.time() - t_start) / 60:.1f} min (the stage at {start + int(league.steps):,} of {budget:,})")
     log_file.close()
 
 
