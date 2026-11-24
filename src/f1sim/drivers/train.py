@@ -116,8 +116,14 @@ def main(argv=None):
         print(f"warm start: the replay fills to {100 * ws['fill']:.0f}% (step {plan.learn_from:,}), then the critics learn alone for {ws['critic_steps']:,} gradient steps (to step {plan.actor_from:,}), then the actor ramps up to full over {ws['actor_ramp']:,} (to step {plan.full_from:,})")
     else:
         print(f"from scratch: learning from step {plan.learn_from:,}")
-    w = jnp.asarray(s.weights)
-    meta = {"reward_scale": s.reward_scale, **checkpoint.provenance(), "profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION, "init": a.init}
+    own = s.stage_a.get("rewards", {})  # stage A's own base values (a milder crash cost), x the reward scale
+    weights = np.array(s.weights)
+    for term, value in own.items():
+        weights[rewards.TERMS.index(term)] = float(value) * s.reward_scale
+    if own:
+        print("stage A rewards: " + ", ".join(f"{t} {v:g}" for t, v in own.items()) + " (the other stages: the [rewards] values)")
+    w = jnp.asarray(weights)
+    meta = {"reward_scale": s.reward_scale, **checkpoint.provenance(), "profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION, "init": a.init, "stage_a_rewards": own}
     print(f"{s.profile}: d={s.tqc.drop} ({s.tqc.drop * s.tqc.critics} of {s.tqc.critics * s.tqc.quantiles} atoms dropped)  H0={s.tqc.target_entropy}  gamma={s.tqc.gamma}  {p['races']} races x 1 car  replay {p['replay']:,}")
 
     eval_bank = make_bank(eval_tracks(a.tracks, "normal", a.eval_tracks))
@@ -143,7 +149,7 @@ def main(argv=None):
         carry, (info, m) = chunk(carry, bank)
         jax.block_until_ready(carry.steps)
         n = int(carry.steps)
-        rec = chunk_record(info, m, s.weights, time.time() - t0, p["chunk"], slots)
+        rec = chunk_record(info, m, weights, time.time() - t0, p["chunk"], slots)
         log({"kind": "chunk", "env_steps": n, **rec})
         alpha = f"  alpha {rec['alpha']:.3f}  q {rec['q']:7.1f}  H {rec['entropy']:5.2f}" if "alpha" in rec else "  (warming up)"
         print(
@@ -161,7 +167,7 @@ def main(argv=None):
             next_eval += eval_every
             if n <= plan.actor_from:  # the actor hasn't moved yet: the same driver, the same eval
                 continue
-            r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], p["eval_seeds"], weights=s.weights)
+            r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], p["eval_seeds"], weights=weights)
             log({"kind": "eval", "env_steps": n, **r})
             info_ckpt = {**meta, "env_steps": n, "eval": r}
             checkpoint.save(out / "latest.npz", carry.agent, info_ckpt)
