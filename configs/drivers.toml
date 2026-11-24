@@ -98,6 +98,9 @@ patience = 3                # evals without a better eval before stage A stops (
 crash = -250.0              # a tenth of the -2500 (user, 2026-11-24): at -2500 from scratch the driver learned to crawl,
                             # 12-20x slower than the reference lap and slowing (evals at 50-150k), where the old stage A
                             # (milder crash costs) drove at x1.3 from its first eval
+time = 0.0                  # no time charge in stage A (test, 2026-11-24): with Middle's -0.7 a step, a car slower than 70%
+                            # of reference pace lost reward every step it lived; at -250 that run crawled at x15-20 and
+                            # crashed about once a lap from 400k on (archive/stage-a-time07-20261124)
 
 [stage_b]                   # B: Middle in a field with every rule (f1sim-train-b --stage b); C and D build on it
 per_profile = 4             # learning cars per profile x 4 profiles' worth: Middle alone takes all 16 of 22, D's three 5 each

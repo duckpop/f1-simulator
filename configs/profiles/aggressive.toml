@@ -15,5 +15,6 @@ wall_close = 1.0
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
 slip = -0.1667             # a third of the base -0.5 (user, 2026-11-22): sliding at the limit costs less, so pushing pays
-time = -0.8                 # per step racing in a race: finishing sooner pays most for it (2026-11-20)
+time = -0.4                 # per step racing in a race: finishing sooner pays most for it (2026-11-20; halved from -0.8,
+                            # user 2026-11-24: break-even pace x1.25 -> x2.5)
 crash = -2000.0             # bolder: a crash costs less than for the others, still far beyond any gain (was -70)

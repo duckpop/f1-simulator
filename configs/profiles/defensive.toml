@@ -15,5 +15,6 @@ wall_close = 1.5
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
 slip = -0.1667             # a third of the base -0.5 (user, 2026-11-22): sliding at the limit costs less, so pushing pays
-time = -0.6                 # per step racing in a race: pace matters, less than keeping its place (2026-11-20)
+time = -0.3                 # per step racing in a race: pace matters, less than keeping its place (2026-11-20; halved from
+                            # -0.6, user 2026-11-24: break-even pace x1.67 -> x3.3)
 crash = -3000.0             # more careful: keeping the place matters more than any one move (was -150)

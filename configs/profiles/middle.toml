@@ -15,5 +15,7 @@ wall_close = 1.0
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
 slip = -0.1667             # a third of the base -0.5 (user, 2026-11-22): sliding at the limit costs less, so pushing pays
-time = -0.7                 # per step racing in a race, so finishing sooner pays: between Aggressive (-0.8) and
-                            # Defensive (-0.6); without it run sc2 drove 17% slower than the lap sim alone (2026-11-20)
+time = -0.35                # per step racing in a race, so finishing sooner pays: between Aggressive (-0.4) and
+                            # Defensive (-0.3); without it run sc2 drove 17% slower than the lap sim alone (2026-11-20).
+                            # Halved from -0.7 (user, 2026-11-24): below x1.43 of the reference a step cost more than it
+                            # paid and the driver crawled; now break-even is x2.9
