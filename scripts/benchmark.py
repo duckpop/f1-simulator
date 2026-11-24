@@ -43,6 +43,77 @@ def gpu_info():
         return "nvidia-smi not found"
 
 
+def smi(fields):
+    """nvidia-smi's values for these query fields, {field: value} (per GPU: the first one visible)."""
+    out = {}
+    for f in fields:  # one at a time: a field this driver doesn't know shouldn't lose the others
+        try:
+            v = subprocess.run(["nvidia-smi", f"--query-gpu={f}", "--format=csv,noheader"], capture_output=True, text=True, timeout=10).stdout.strip().splitlines()
+            out[f] = v[0].strip() if v else ""
+        except (OSError, subprocess.SubprocessError):
+            out[f] = "nvidia-smi not found"
+    return out
+
+
+def gpu_specs():
+    """The GPU and what this job may use of it: the card (nvidia-smi), the job's share (SLURM, cgroup limits, MIG),
+    JAX's view (devices, the memory it may allocate), and measured speeds (matrix products, memory bandwidth)."""
+    import jax
+    import jax.numpy as jnp
+
+    card = smi(["name", "memory.total", "memory.used", "memory.free", "compute_cap", "clocks.max.sm", "clocks.max.memory", "clocks.sm",
+                "power.limit", "power.max_limit", "pcie.link.gen.max", "pcie.link.width.max", "driver_version", "mig.mode.current",
+                "persistence_mode", "ecc.mode.current", "temperature.gpu", "count"])
+    try:
+        cuda = re.search(r"CUDA Version:\s*([\d.]+)", subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=10).stdout)
+        card["cuda_version"] = cuda.group(1) if cuda else ""
+        card["mig_instances"] = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    job = {k: os.environ.get(k) for k in ("CUDA_VISIBLE_DEVICES", "SLURM_JOB_ID", "SLURM_JOB_PARTITION", "SLURM_GPUS", "SLURM_JOB_GPUS", "SLURM_GPUS_ON_NODE",
+                                          "SLURM_CPUS_PER_TASK", "SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU", "SLURM_JOB_NODELIST") if os.environ.get(k)}
+    try:
+        job["cpus_usable"] = len(os.sched_getaffinity(0))
+    except AttributeError:
+        job["cpus_usable"] = os.cpu_count()
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):  # the job's RAM limit
+        try:
+            v = Path(path).read_text().strip()
+            job["ram_limit_gb"] = "none" if v == "max" or int(v) > 1 << 60 else round(int(v) / 2**30, 1)
+            break
+        except (OSError, ValueError):
+            continue
+    try:
+        job["ram_total_gb"] = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30, 1)
+    except (ValueError, OSError):
+        pass
+    d = jax.devices()[0]
+    stats = d.memory_stats() or {}
+    view = {"devices": [str(x) for x in jax.devices()], "kind": getattr(d, "device_kind", ""), "jax": jax.__version__,
+            "jax_memory_limit_gb": round(stats.get("bytes_limit", 0) / 2**30, 2), "mem_fraction": os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
+            "preallocate": os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE")}
+    measured = {}
+    for dtype, name in ((jnp.float32, "f32 (TF32 allowed)"), (jnp.bfloat16, "bf16")):  # dense matrix products
+        n = 8192
+        x = jnp.ones((n, n), dtype)
+        f = jax.jit(lambda a: a @ a)
+        f(x).block_until_ready()
+        t = time.perf_counter()
+        for _ in range(10):
+            y = f(x)
+        y.block_until_ready()
+        measured[f"matmul_tflops_{name}"] = round(10 * 2 * n**3 / (time.perf_counter() - t) / 1e12, 1)
+    x = jnp.ones((256 * 2**20,), jnp.float32)  # 1 GiB: read + write per copy
+    g = jax.jit(lambda a: a * 1.0001)
+    g(x).block_until_ready()
+    t = time.perf_counter()
+    for _ in range(10):
+        x = g(x)
+    x.block_until_ready()
+    measured["memory_gb_per_s"] = round(10 * 2 * x.nbytes / (time.perf_counter() - t) / 1e9)
+    return {"card": card, "job": job, "jax": view, "measured": measured}
+
+
 def git(path, *args):
     try:
         return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=10).stdout.strip()
@@ -99,6 +170,14 @@ def main():
         tpath.write_text("\n".join(lines) + "\n")
 
     say(f"checker on {host}: {res['gpu']} | f1sim {res['f1sim_git'][:10]}")
+    say("\nthe GPU and what this job may use of it")
+    try:
+        res["gpu_specs"] = gpu_specs()
+        for part, vals in res["gpu_specs"].items():
+            say(f"  {part}: " + "; ".join(f"{k} {v}" for k, v in vals.items() if v not in ("", None)))
+    except Exception as e:  # noqa: BLE001 - the specs are extra: the speed runs go on without them
+        res["gpu_specs"] = {"error": repr(e)}
+        say(f"  could not read them: {e!r}")
     save()
     steps_a = 4000 if a.quick else 8000
     steps_b = 3000 if a.quick else 6000
