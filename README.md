@@ -49,6 +49,10 @@ python -m f1sim.drivers.plot runs --out runs/curves.png
                                                   # the newest stage's curves (several run directories: overlaid)
 ```
 
+On a cluster (SLURM, one GPU): `scripts/cluster_setup.sh` (clone, install, CPU tests; login node), then
+`scripts/cluster_tracks.sh` (the track pool on the CPU, no job), then `sbatch scripts/cluster_stage_a.slurm` (stage A
+from scratch on the GPU). `scripts/benchmark.py` measures a GPU in ~15 minutes and saves the results to runs/.
+
 Without a pool, `--generate N` makes N training tracks on the spot (and the eval tracks from their seeds), for small
 runs: `f1sim-train --generate 4 --eval-tracks 2 --steps 20000`.
 
