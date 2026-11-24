@@ -1,5 +1,4 @@
 import os
-import time
 
 import jax
 import pytest
@@ -17,16 +16,14 @@ def test_newest_best(tmp_path):
         watch.newest_best(tmp_path, "middle")
     (a / "latest.npz").touch()
     assert watch.newest_best(tmp_path, "middle").name == "latest.npz"
-    (a / "best-26.npz").touch()
-    time.sleep(0.01)
-    (a / "best-20.npz").touch()
-    os.utime(a / "best-26.npz", (1, 1))  # older
-    assert watch.newest_best(tmp_path, "middle").name == "best-20.npz"  # the curriculum's current width
     (a / "best.npz").touch()
     assert watch.newest_best(tmp_path, "middle").name == "best.npz"
     (tmp_path / "middle" / "stage-b").mkdir()
     (tmp_path / "middle" / "stage-b" / "best.npz").touch()
     assert watch.newest_best(tmp_path, "middle").parent.name == "stage-b"
+    (tmp_path / "middle" / "stage-d").mkdir()
+    (tmp_path / "middle" / "stage-d" / "best.npz").touch()
+    assert watch.newest_best(tmp_path, "middle").parent.name == "stage-d"  # the latest stage of the regime
 
 
 def test_record(tracks, tmp_path):

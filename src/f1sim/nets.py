@@ -1,9 +1,11 @@
 """Networks in plain JAX. Parameters are nested dicts and lists of arrays, so an ensemble of critics is one vmap away.
 
-The driver's inputs are split in two, in the order f1env's DRIVER_LAYOUT gives them: the lidar (50 beams x 3
-readings: edge, closing speed, barrier) goes through a 1D convolution along the beams; the other ~59 inputs (car,
-tyres, race, orders, status) go through a small MLP. The two are joined and fed to the head: the actor's or a
-critic's. Every network has its own encoder, so the critics' and the actor's losses never fight over shared weights.
+The driver's inputs are split in two, in the order f1env's DRIVER_LAYOUT gives them: the lidar (50 beams x 2
+readings: edge, barrier; 3 with closing speeds until 2026-11-06) goes through a 1D convolution along the beams; the
+other 84 inputs (car, tyres, race, orders, status, the cars around) go through a small MLP. The two are joined and fed to the head: the actor's or a
+critic's. The actor has its own encoder, so the critics' and the actor's losses never fight over shared weights. The
+critics have one each, or (`shared`, since 2026-11-24) one for the whole ensemble: {"shared": encoder, "head": the
+N heads stacked}, which reads the inputs once instead of N times; the critics then differ only in their heads.
 For small test tasks (`lidar_beams = 0`) the encoder is the identity.
 """
 
@@ -20,9 +22,10 @@ LOG_STD_MIN, LOG_STD_MAX = -20.0, 2.0
 
 class EncoderSpec(NamedTuple):
     lidar_beams: int = 0  # 0: no lidar branch, the inputs go straight to the head
-    lidar_channels: int = 3
+    lidar_channels: int = 2
     conv: tuple = ((32, 5, 2), (64, 3, 2))  # (filters, width, stride) per layer
     other_hidden: tuple = (128,)
+    bf16: bool = False  # the dense layers' products in bfloat16 (weights kept in float32, sums in float32): ~10% faster gradient steps, ~3 significant digits (2026-11-24)
 
 
 def _uniform(key, shape, bound):
@@ -41,9 +44,9 @@ def mlp_init(key, sizes):
     return [dense_init(k, a, b) for k, a, b in zip(keys, sizes[:-1], sizes[1:])]
 
 
-def mlp(layers, x, last_relu: bool = False):
+def mlp(layers, x, last_relu: bool = False, bf16: bool = False):
     for i, p in enumerate(layers):
-        x = x @ p["w"] + p["b"]
+        x = (jnp.dot(x.astype(jnp.bfloat16), p["w"].astype(jnp.bfloat16), preferred_element_type=jnp.float32) if bf16 else x @ p["w"]) + p["b"]
         if i < len(layers) - 1 or last_relu:
             x = jax.nn.relu(x)
     return x
@@ -76,13 +79,13 @@ def encode(params, spec: EncoderSpec, obs):
         return obs
     lead = obs.shape[:-1]
     n = spec.lidar_beams * spec.lidar_channels
-    # the observation holds the lidar channel by channel (all edges, then closing speeds, then barriers)
+    # the observation holds the lidar channel by channel (all edges, then all barriers)
     x = obs[..., :n].reshape(-1, spec.lidar_channels, spec.lidar_beams).transpose(0, 2, 1)
     for p, (_, _, stride) in zip(params["conv"], spec.conv):
         x = jax.lax.conv_general_dilated(x, p["w"], (stride,), "VALID", dimension_numbers=("NWC", "WIO", "NWC"))
         x = jax.nn.relu(x + p["b"])
     lidar = x.reshape(lead + (-1,))
-    other = mlp(params["other"], obs[..., n:], last_relu=True) if spec.other_hidden else obs[..., n:]
+    other = mlp(params["other"], obs[..., n:], last_relu=True, bf16=spec.bf16) if spec.other_hidden else obs[..., n:]
     return jnp.concatenate([lidar, other], axis=-1)
 
 
@@ -97,7 +100,7 @@ def actor_init(key, spec: EncoderSpec, obs_dim: int, act_dim: int, hidden):
 
 def actor_dist(params, spec: EncoderSpec, obs):
     """(mean, log std) of the Gaussian before the tanh."""
-    out = mlp(params["head"], encode(params["enc"], spec, obs))
+    out = mlp(params["head"], encode(params["enc"], spec, obs), bf16=spec.bf16)
     mean, log_std = jnp.split(out, 2, axis=-1)
     return mean, jnp.clip(log_std, LOG_STD_MIN, LOG_STD_MAX)
 
@@ -126,15 +129,39 @@ def critic_init(key, spec: EncoderSpec, obs_dim: int, act_dim: int, hidden, quan
     return {"enc": enc, "head": mlp_init(k_head, [n + act_dim, *hidden, quantiles])}
 
 
-def ensemble_init(key, n: int, spec: EncoderSpec, obs_dim: int, act_dim: int, hidden, quantiles: int):
-    """n critics' parameters, stacked on a leading axis."""
-    return jax.vmap(lambda k: critic_init(k, spec, obs_dim, act_dim, hidden, quantiles))(jax.random.split(key, n))
+def ensemble_init(key, n: int, spec: EncoderSpec, obs_dim: int, act_dim: int, hidden, quantiles: int, shared: bool = False):
+    """n critics' parameters, stacked on a leading axis; shared: one encoder for all n (`share_encoder`'s layout)."""
+    critics = jax.vmap(lambda k: critic_init(k, spec, obs_dim, act_dim, hidden, quantiles))(jax.random.split(key, n))
+    return share_encoder(critics) if shared else critics
+
+
+def is_shared(params) -> bool:
+    """A critic ensemble with one encoder for all its critics."""
+    return "shared" in params
+
+
+def share_encoder(params, which: int = 0):
+    """An ensemble with an encoder per critic -> one with critic `which`'s encoder shared by all (the heads as they
+    are; each was trained on its own encoder's features, so the others need relearning)."""
+    return {"shared": jax.tree.map(lambda x: x[which], params["enc"]), "head": params["head"]}
+
+
+def critic_features(params, spec: EncoderSpec, obs, action):
+    """(n critics, ..., features + actions): what each critic's head reads."""
+    n = jax.tree.leaves(params["head"])[0].shape[0]
+    if is_shared(params):
+        x = jnp.concatenate([encode(params["shared"], spec, obs), action], axis=-1)
+        return jnp.broadcast_to(x, (n,) + x.shape)
+    return jax.vmap(lambda p: jnp.concatenate([encode(p, spec, obs), action], axis=-1), axis_size=n)(params["enc"])  # (an encoder may have no weights)
 
 
 def ensemble(params, spec: EncoderSpec, obs, action):
     """(n critics, ..., quantiles)."""
+    if is_shared(params):  # the inputs read once, every head on the same features
+        x = jnp.concatenate([encode(params["shared"], spec, obs), action], axis=-1)
+        return jax.vmap(lambda h: mlp(h, x, bf16=spec.bf16))(params["head"])
 
     def one(p):
-        return mlp(p["head"], jnp.concatenate([encode(p["enc"], spec, obs), action], axis=-1))
+        return mlp(p["head"], jnp.concatenate([encode(p["enc"], spec, obs), action], axis=-1), bf16=spec.bf16)
 
     return jax.vmap(one)(params)

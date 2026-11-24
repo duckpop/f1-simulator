@@ -2,15 +2,18 @@ description = "Overtaking: late braking, high lateral g, takes the gaps it's off
 drop = 1                    # 5 of 125: the most optimistic critic
 target_entropy = -1.5
 gamma = 0.990               # ~100 steps, 5 s (was 0.985)
-start_from = "middle"
 
 [weights]
 overtake = 2.0
 place_lost = 0.6            # -15 (was 0.5 of -20, -10)
 holding = 0.5
 inside_line = 0.0
-tyre_wear = 0.5
+tyre_wear = 0.3             # trades tyre life for lap time (was 0.5; 2026-11-20)
 smoothness = 0.5
+car_close = 0.5  # close to other cars is how it races; close to a barrier never pays
+wall_close = 1.0
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
+slip = -0.1667             # a third of the base -0.5 (user, 2026-11-22): sliding at the limit costs less, so pushing pays
+time = -0.8                 # per step racing in a race: finishing sooner pays most for it (2026-11-20)
 crash = -2000.0             # bolder: a crash costs less than for the others, still far beyond any gain (was -70)

@@ -1,16 +1,18 @@
 description = "Tyre saving: little wheelspin, smooth trail-braking, low tyre slip, steady long-run pace."
 drop = 3                    # 15 of 125 (d = 4 to compare)
 target_entropy = -2.5
-gamma = 0.996               # ~250 steps, 12.5 s (was 0.997)
-start_from = "middle"
+gamma = 0.994               # ~167 steps, 8.3 s, as Middle (since 2026-11-14; was 0.996, ~250 steps: in the mixed run m2 its
+                            # q fell to -33 at 150k, below standing still for good (-0.1 a step, -25), and it stopped on track)
 
 [weights]
 overtake = 0.5
 place_lost = 1.0
 holding = 0.5
 inside_line = 0.0
-tyre_wear = 2.0
+tyre_wear = 6.0             # x3 since 2026-11-15 (was 2): with tyre_save the two were ~4% of its reward, too little to move it
 smoothness = 1.5            # (was 2)
+car_close = 1.5  # clean, unhurried lines
+wall_close = 1.5
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
 # a crash ends the episode, so it has to cost more than driving on at a loss: with the doubled tyre and smoothness
@@ -18,3 +20,6 @@ smoothness = 1.5            # (was 2)
 # At -300 (stage B, 250k steps) it earned +0.10 per step without its crashes, but the crashes (-0.36 per step) swamped
 # everything else, so it went to -140; then -200 (2026-10-30), still well over its ~250-step horizon of driving on
 crash = -2500.0             # as the base since 2026-11-05 (was -230)
+# its goal is as much tyre life as it can get: wear under the rated amount pays at the rate wear over it costs
+# (tyre_wear -10 x 6), so saving has no ceiling at the rated life. No other profile has this.
+tyre_save = 60.0            # per % of tyre life saved against the compound's rated wear for the distance (2026-11-14; 20 until 2026-11-15)

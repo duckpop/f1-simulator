@@ -38,10 +38,11 @@ from .. import checkpoint, tqc
 from . import env as de
 from . import evaluate
 from .config import PROFILES, load
-from .rewards import TERMS
+from . import rewards
+from .rewards import ORDER_TERMS, TERMS
 
 CARS = 22
-STEP_S = 0.05
+STEP_S = de.STEP_S
 V2 = {  # measured 2026-10-24/25 on v2's environment (real tracks): the bar, though the conditions differ
     "alone": {"finish_rate": 0.53, "crashes_per_lap": 0.0139},
     "season": {"middle": {"finish_rate": 0.36, "out_lap1": 0.28}, "aggressive": {"finish_rate": 0.34, "out_lap1": 0.29}, "defensive": {"finish_rate": 0.32, "out_lap1": 0.30}},
@@ -56,8 +57,10 @@ class Attacks(NamedTuple):
     lost: jax.Array  # spells that ended with the place lost
 
 
-def track_attacks(a: Attacks, attack, lost) -> Attacks:
-    lose = (lost > 0) & (a.on | attack)
+def track_attacks(a: Attacks, attack, lost, out=None) -> Attacks:
+    """out: (R, C) the car's race ended this step (a crash, a black flag): a spell it was in counts as lost, so
+    defending only counts if the car is still racing after it (since 2026-11-21)."""
+    lose = ((lost > 0) | (False if out is None else out)) & (a.on | attack)
     return Attacks(attack & ~lose, a.count + (attack & ~a.on), a.lost + lose)
 
 
@@ -72,11 +75,17 @@ class Tally(NamedTuple):
     metres: jax.Array  # progress on the track
     wear: jax.Array  # % of tyre life used
     crashes: jax.Array
+    warnings: jax.Array  # (R, C, 7) by kind (`env.WARNING_KINDS`)
+    black_by: jax.Array  # (R, C, 7) black flags by the kind of the 4th warning
+    clean_s: jax.Array = 0.0  # s of clean running (`env.clean_running`)
+    clean_sim_s: jax.Array = 0.0  # ... and the lap sim's s for the same metres
+    attacking: Attacks | None = None  # spells attacking the car ahead (`lost`: those that ended in a pass)
 
 
 def new_tally(r: int, c: int) -> Tally:
     z = jnp.zeros((r, c))
-    return Tally(jnp.zeros((r, c, len(TERMS))), z, z, z, Attacks(z > 0, z, z), z, z, z)
+    w = jnp.zeros((r, c, len(de.WARNING_KINDS)))
+    return Tally(jnp.zeros((r, c, len(TERMS))), z, z, z, Attacks(z > 0, z, z), z, z, z, w, w, z, z, Attacks(z > 0, z, z))
 
 
 def seats_for(profiles: int = len(PROFILES), cars: int = CARS, reference: bool = False) -> np.ndarray:
@@ -87,7 +96,7 @@ def seats_for(profiles: int = len(PROFILES), cars: int = CARS, reference: bool =
 
 
 @lru_cache(maxsize=4)
-def _runner(ecfg: de.EnvConfig, cfg: tqc.TQCConfig, steps: int, seats: tuple):
+def _runner(ecfg: de.EnvConfig, cfg: tqc.TQCConfig, steps: int, seats: tuple, sampled: tuple = ()):
     seats = np.asarray(seats)
     idx = [np.flatnonzero(seats == p) for p in range(int(seats.max()) + 1)]
 
@@ -97,44 +106,60 @@ def _runner(ecfg: de.EnvConfig, cfg: tqc.TQCConfig, steps: int, seats: tuple):
             state, obs, t = c
             actions = jnp.zeros((ecfg.races, ecfg.cars, de.ACTIONS))
             for p, sl in enumerate(idx):
-                a = tqc.act(actors[p], cfg, obs[:, sl].reshape(-1, de.OBS), k, mean=True)
+                a = tqc.act(actors[p], cfg, obs[:, sl].reshape(-1, de.OBS), jax.random.fold_in(k, p), mean=p not in sampled)
                 actions = actions.at[:, sl].set(a.reshape(ecfg.races, len(sl), de.ACTIONS))
             state, obs, out, _ = de.step(bank, state, actions, k, ecfg)
             t = Tally(
-                t.amounts + out.amounts, t.laps + out.lap_done, t.valid + out.valid, t.slipping + out.slipping, track_attacks(t.attacks, out.attack, out.lost),
-                t.metres + out.metres, t.wear + out.wear, t.crashes + out.crashed,
+                t.amounts + out.amounts, t.laps + out.lap_done, t.valid + out.valid, t.slipping + out.slipping, track_attacks(t.attacks, out.attack, out.lost, out.crashed | (out.black_by.sum(-1) > 0)),
+                t.metres + out.metres, t.wear + out.wear, t.crashes + out.crashed, t.warnings + out.warnings, t.black_by + out.black_by,
+                t.clean_s + out.clean_s, t.clean_sim_s + out.clean_sim_s, track_attacks(t.attacking, out.attacking, out.gained),
             )
             return (state, obs, t), None
 
-        (state, obs, tally), _ = jax.lax.scan(body, (state, obs, tally), jax.random.split(key, steps))
-        return state, obs, tally
+        keys = jax.random.split(key, steps)
+
+        def going(c):  # blocks left, and a race still on
+            i, state, _, _ = c
+            return (i < steps // de.EXACT_END) & ~jnp.all(de.race_done(bank, state.race, state.limit, ecfg))
+
+        def block(c):
+            i, state, obs, t = c
+            (state, obs, t), _ = jax.lax.scan(body, (state, obs, t), jax.lax.dynamic_slice_in_dim(keys, i * de.EXACT_END, de.EXACT_END))
+            return i + 1, state, obs, t
+
+        i, state, obs, tally = jax.lax.while_loop(going, block, (jnp.int32(0), state, obs, tally))
+        return state, obs, tally, i * de.EXACT_END
 
     return run
 
 
-def run_session(env: F1Env, session, actors, cfg: tqc.TQCConfig, seats, ecfg: de.EnvConfig, key, chunk: int = 2000, max_steps: int = 400_000):
-    """Drive an F1Env session to its end with the actors (mean actions). Returns (session, Tally, steps)."""
+def run_session(env: F1Env, session, actors, cfg: tqc.TQCConfig, seats, ecfg: de.EnvConfig, key, chunk: int = 2000, max_steps: int = 400_000, sampled: tuple = ()):
+    """Drive an F1Env session to its end with the actors (mean actions; the actors in `sampled`, by index, draw theirs
+    as in training). Returns (session, Tally, steps)."""
     k_wrap, key = jax.random.split(key)
     state, obs = de.compiled("from_race", ecfg)(env.bank, session.state, k_wrap, plan=None if session.race else session.plan)
     tally = new_tally(*session.state.s.shape)
-    run = _runner(ecfg, cfg, chunk, tuple(int(x) for x in seats))
+    run = _runner(ecfg, cfg, chunk, tuple(int(x) for x in seats), tuple(sampled))
     done_fn = de.compiled("race_done", ecfg)
     steps = 0
     while steps < max_steps:
         key, k = jax.random.split(key)
-        state, obs, tally = run(env.bank, tuple(actors), state, obs, tally, k)
-        steps += chunk
-        if bool(np.asarray(done_fn(env.bank, state.race, state.limit)).all()):
+        state, obs, tally, ran = run(env.bank, tuple(actors), state, obs, tally, k)
+        steps += int(ran)
+        if int(ran) < chunk or bool(np.asarray(done_fn(env.bank, state.race, state.limit)).all()):
             break
     session.state = state.race
     return session, tally, steps
 
 
-def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000, log=print, label=None, names=PROFILES, weights=None, reference=None) -> dict:
+def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000, log=print, label=None, names=PROFILES, weights=None, reference=None, sampled: tuple = (), march_steps: int = de.MARCH_STEPS, orders: bool = False) -> dict:
     """Full weekends (Q1, Q2, Q3 decide the grid, then the race) for R parallel seasons: calendar (R, rounds) eval
     tracks of `env`, round k with f1env's eval key k; the profiles' actors in seats_for(), `names` theirs in order.
     weights: each profile's reward weights, for its reward per step (None: not measured). reference: an actor for a
-    fixed reference field in the odd cars (reported as "reference"), so points mean the same from eval to eval."""
+    fixed reference field in the odd cars (reported as "reference"), so points mean the same from eval to eval.
+    sampled: the actors (by index) that draw their actions as in training instead of taking the mean (a diagnostic).
+    march_steps: the lidar's steps per beam (`EnvConfig.march_steps`), as the training races have it. orders: stage
+    C's random principal gives every car team orders in the races (`env.random_orders`; the same draws each eval)."""
     calendar = np.asarray(calendar)
     seasons, rounds = calendar.shape
     actors, names = list(actors), tuple(names[: len(actors)])
@@ -144,15 +169,15 @@ def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000
     weights = None if weights is None else list(weights) + [None] * (len(actors) - len(weights))
     ids = np.array([PROFILES.index(n) if n in PROFILES else 0 for n in names])  # f1env's profile ids (the reference: Middle's)
     s = env.reset_season(jax.random.PRNGKey(2026), calendar=calendar, profiles=np.tile(ids[seats], (seasons, 1)))
-    ecfg = de.EnvConfig(races=seasons, cars=CARS, upgrades=False, auto_reset=False, quali=True, race=env.wcfg.race)
+    ecfg = de.EnvConfig(races=seasons, cars=CARS, upgrades=False, auto_reset=False, quali=True, race=env.wcfg.race, march_steps=march_steps, random_orders=orders)
     keys = eval_keys()
     total, out_lap1, grids, scheduled = None, [], [], []
     for rnd in range(rounds):
         t0, n = time.time(), 0
-        for i, kind in enumerate(("Q1", "Q2", "Q3", "race")):
+        for i, kind in enumerate(("one-lap", "race") if env.wcfg.qualifying == "one-lap" else ("Q1", "Q2", "Q3", "race")):
             k = jax.random.fold_in(keys[rnd % len(keys)], i)
             session = env.start_session(s, kind, key=k)
-            session, tally, steps = run_session(env, session, actors, cfg, seats, ecfg, k, chunk)
+            session, tally, steps = run_session(env, session, actors, cfg, seats, ecfg, k, chunk, sampled=sampled)
             n += steps
             if kind == "race":
                 total = tally if total is None else jax.tree.map(jnp.add, total, tally)
@@ -167,7 +192,22 @@ def weekends(env: F1Env, actors, cfg: tqc.TQCConfig, calendar, chunk: int = 2000
             where = label(rnd) if label else f"round {rnd + 1}"
             winners = ", ".join(names[seats[w]] for w in np.argmin(h["place"], axis=-1))
             log(f"{where}: won by {winners}; finished {100 * np.mean(h['finished']):.0f}%  ({n:,} steps in {time.time() - t0:.0f} s)", flush=True)
-    return summarise(s, total, np.stack(out_lap1, axis=1), np.stack(grids, axis=1), seats, rounds, names, weights, np.stack(scheduled, axis=1))
+    res = summarise(s, total, np.stack(out_lap1, axis=1), np.stack(grids, axis=1), seats, rounds, names, weights, np.stack(scheduled, axis=1))
+    return against_reference(res)
+
+
+def against_reference(res: dict) -> dict:
+    """Each profile against the reference field in the same races (the same draw, weather and tracks, so it carries
+    from eval to eval): its clean pace over the reference's (under 1: faster) and whether it's less safe beyond the noise."""
+    ref = res["profiles"].get("reference")
+    if ref is None:
+        return res
+    for name, r in res["profiles"].items():
+        if name != "reference":
+            r["pace_vs_reference"] = r["clean_pace"] / ref["clean_pace"] if np.isfinite(ref["clean_pace"]) and ref["clean_pace"] > 0 else float("nan")
+            r["riskier_than_reference"] = evaluate.safer(r, ref) > 0
+            r["reference_incidents"], r["reference_km"] = ref["incidents"], ref["km"]  # for `evaluate.riskier` at k x its rate
+    return res
 
 
 def season(tracks, actors, cfg: tqc.TQCConfig, seasons: int = 1, rounds: int = 24, race_km: float = 305.0, chunk: int = 2000, env: F1Env | None = None, log=print) -> dict:
@@ -178,17 +218,20 @@ def season(tracks, actors, cfg: tqc.TQCConfig, seasons: int = 1, rounds: int = 2
     return weekends(env, actors, cfg, cal, chunk, log, label)
 
 
-def weekend_env(tracks, laps: int = 50) -> F1Env:
-    """f1env's weekends on these tracks with races of `laps` laps (Q1-Q3 as in F1)."""
-    return F1Env(tracks, WeekendConfig(race_laps=(laps, laps)))
+def weekend_env(tracks, laps: int = 50, sb: dict | None = None) -> F1Env:
+    """f1env's weekends on these tracks: one-lap qualifying (one flying lap each sets the grid; ~8k steps against
+    Q1-Q3's 54k, since 2026-11-24), then races of `laps` laps, under the stage's race rules as its training races have
+    them (`env.stage_race`: sb, the stage's settings)."""
+    w = WeekendConfig()
+    return F1Env(tracks, w._replace(qualifying="one-lap", race_laps=(laps, laps), race=de.stage_race(w.race, sb or {})))
 
 
-def eval_weekend(env: F1Env, actors, cfg: tqc.TQCConfig, seeds: int = 1, chunk: int = 2000, log=None, names=PROFILES, weights=None, reference=None) -> dict:
+def eval_weekend(env: F1Env, actors, cfg: tqc.TQCConfig, seeds: int = 1, chunk: int = 2000, log=None, names=PROFILES, weights=None, reference=None, sampled: tuple = (), march_steps: int = de.MARCH_STEPS, orders: bool = False) -> dict:
     """Stage B's eval: one full weekend on every track of `env` (`seeds` times each, in parallel), the profiles
     (`names`, one per actor) racing each other and, if given, a fixed reference field. The per-profile results of
     `summarise` (points per race, distance, reward per step, finishes, out on lap 1, style)."""
     n = len(env.tracks)
-    return weekends(env, actors, cfg, np.tile(np.arange(n), seeds)[:, None], chunk, log, lambda rnd: f"eval weekend on {n} tracks", names, weights, reference)
+    return weekends(env, actors, cfg, np.tile(np.arange(n), seeds)[:, None], chunk, log, lambda rnd: f"eval weekend on {n} tracks", names, weights, reference, sampled, march_steps, orders)
 
 
 def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int, names=PROFILES, weights=None, scheduled=None) -> dict:
@@ -200,6 +243,9 @@ def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int, names=PROFIL
     amounts = np.asarray(total.amounts)
     laps, valid, slipping, metres, worn, crashes = (np.asarray(x) for x in (total.laps, total.valid, total.slipping, total.metres, total.wear, total.crashes))
     att_count, att_lost = np.asarray(total.attacks.count), np.asarray(total.attacks.lost)
+    warned, black_by = np.asarray(total.warnings), np.asarray(total.black_by)
+    clean_s, clean_sim = np.asarray(total.clean_s), np.asarray(total.clean_sim_s)
+    made, won = np.asarray(total.attacking.count), np.asarray(total.attacking.lost)
     champions = seats[s.standings.drivers()[:, 0]]
     res = {"seasons": int(hist["points"].shape[0]), "rounds": rounds, "profiles": {}, "out_lap1_field": float(out_lap1.mean()), "champions": [names[c] for c in champions]}
     for p, name in enumerate(names[: int(seats.max()) + 1]):
@@ -234,6 +280,20 @@ def summarise(s, total: Tally, out_lap1, grids, seats, rounds: int, names=PROFIL
             "mean_grid_slot": float(grids[..., sl].mean() + 1),
             "titles": int(sum(c == p for c in champions)),
             **evaluate.incidents(crashes[:, sl].sum() + amounts[:, sl, t["black_flag"]].sum(), km),
+            "crashes": float(crashes[:, sl].sum()),
+            # the race pace with a clear road: seconds driven over the lap sim's for the same metres (lower is faster)
+            "clean_pace": float(clean_s[:, sl].sum() / clean_sim[:, sl].sum()) if clean_sim[:, sl].sum() > 0 else float("nan"),
+            "clean_share": float(clean_s[:, sl].sum() / max(valid[:, sl].sum() * STEP_S, 1e-9)),
+            # attacking: spells within 1 s of the car ahead, and the share that ended in a pass
+            "attacks_made_per_race": float(made[:, sl].sum() / (cars * rounds)),
+            "attack_success": float(won[:, sl].sum() / made[:, sl].sum()) if made[:, sl].sum() else float("nan"),
+            "black_flags": float(amounts[:, sl, t["black_flag"]].sum()),
+            "warnings_by": {k: float(warned[:, sl, i].sum()) for i, k in enumerate(de.WARNING_KINDS)},
+            "black_flags_by": {k: float(black_by[:, sl, i].sum()) for i, k in enumerate(de.WARNING_KINDS)},
+            # stage C: the order terms per 100 km (pace: mini-sectors met less missed; team: failures; defend: places
+            # lost; ers: seconds against), and their cost at the base weights per 100 km (0 with no orders given)
+            "orders": {k.removeprefix("order_"): float(amounts[:, sl, t[k]].sum() * 100.0 / max(km, 1e-9)) for k in ORDER_TERMS},
+            "order_score": float(sum(amounts[:, sl, t[k]].sum() * rewards.BASE[k] for k in ORDER_TERMS) * 100.0 / max(km, 1e-9)),
         }
     return res
 
@@ -314,17 +374,20 @@ def report(alone: dict | None, sea: dict | None, sources: dict, settings: dict) 
     return "\n".join(lines) + "\n"
 
 
-def load_actors(root, stage: str = "b"):
-    """Each profile's best actor (stage B, else stage A with stage "b"); (actors, cfg, sources)."""
+def load_actors(root, stage: str = "d"):
+    """Each profile's newest best actor along the regime (stage D, else C, B, A; from `stage` down), Middle's for a
+    personality with none of its own yet; (actors, cfg, sources)."""
+    chain = ("stage-d", "stage-c", "stage-b", "stage-a")
+    chain = chain[chain.index(f"stage-{stage}") :]
     actors, sources, cfg = [], {}, None
     for p in PROFILES:
-        stages = ["stage-b", "stage-a"] if stage == "b" else ["stage-a"]
-        path = next((Path(root) / p / st / "best.npz" for st in stages if (Path(root) / p / st / "best.npz").exists()), None)
+        found = [Path(root) / q / st / "best.npz" for q in (p, "middle") for st in chain]
+        path = next((x for x in found if x.exists()), None)
         if path is None:
-            raise FileNotFoundError(f"no {' or '.join(stages)} best.npz for {p} under {root}")
+            raise FileNotFoundError(f"no best.npz for {p} or middle under {root} ({', '.join(chain)})")
         info = checkpoint.meta(path)
         s = load(p, info.get("preset", "laptop"))
-        agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc), s.tqc)
+        agent, _ = checkpoint.load(path, tqc.init(jax.random.PRNGKey(0), s.tqc))
         actors.append(agent.actor)
         sources[p] = str(path)
         cfg = cfg or s.tqc

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -48,12 +49,14 @@ def training_tracks(pool, width="normal", n: int = 16, seed: int = 0, log=print)
     return [load_track(Path(pool) / f) for f in files]
 
 
-def eval_tracks(pool, width="normal", n: int = EVAL_TRACKS):
-    """The fixed eval tracks (the first n), widened when asked."""
+def eval_tracks(pool, width="normal", n: int = EVAL_TRACKS, pick=None):
+    """The fixed eval tracks (the first n, or the ones numbered in `pick`), widened when asked."""
+    ks = list(pick) if pick is not None else list(range(n))
     if pool is None:
-        tracks = [generatemap(seed=EVAL_SEED0 + k) for k in range(n)]
+        tracks = [generatemap(seed=EVAL_SEED0 + k) for k in ks]
     else:
-        tracks = [load_track(Path(pool) / e["file"]) for e in load_pool(pool)["eval"][:n]]
+        entries = load_pool(pool)["eval"]
+        tracks = [load_track(Path(pool) / entries[k]["file"]) for k in ks]
     return widened(tracks, width)
 
 
@@ -138,7 +141,7 @@ class Rotation:
                 log(f"{len(self.files)} training tracks at width {width}: {self.n} at a time" + (f", {2 * self.n} on the GPU (rotating)" if self.rotates else ""))
         self.active = 0
         self.fresh = [False, True]  # the second half is loaded but no race has used it yet
-        self.bank = self._build()
+        self.bank = jax.device_put(self._build(), jax.devices()[0])  # built in host memory: committed there until moved
 
     def _take(self):
         """The next n tracks of the shuffled pool (reshuffled when it runs out)."""
@@ -154,6 +157,11 @@ class Rotation:
         return out
 
     def _build(self) -> TrackBank:
+        """The bank of both halves, padded, in host memory (`rotate` moves it to the GPU once the old one is gone)."""
+        with jax.default_device(jax.devices("cpu")[0]):
+            return self._build_here()
+
+    def _build_here(self) -> TrackBank:
         bank = make_bank([t for half in self.halves for t in half])
         sizes = bank_sizes(bank)
         if self.sizes is None or any(s > c for s, c in zip(sizes, self.sizes)):
@@ -175,7 +183,14 @@ class Rotation:
         if not self.fresh[new]:
             self.halves[new] = self._take()
             replaced = np.arange(new * self.n, (new + 1) * self.n, dtype=np.int32)
-            self.bank = self._build()
+            fresh = self._build()
+            # free the old bank on the GPU before the new one goes up: with both there at once a swap needed ~1.1 GB
+            # (2 x 541 MiB for 2 x 20 tracks) on top of the run's steady use, the peak b4b ran out at (2026-11-12)
+            jax.block_until_ready(self.bank)
+            for x in jax.tree.leaves(self.bank):
+                if isinstance(x, jax.Array):
+                    x.delete()
+            self.bank = jax.device_put(fresh, jax.devices()[0])
         self.fresh[new] = False
         self.active = new
         self.rotations += 1

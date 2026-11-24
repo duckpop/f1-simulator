@@ -1,9 +1,9 @@
-"""Training curves from stage B logs, several runs overlaid at matching environment steps (an A/B).
+"""Training curves from stage B-D logs, several runs overlaid at matching environment steps (an A/B).
 
-    python -m f1sim.drivers.plot runs/together5 runs/together6 --out runs/compare.png
-    f1sim-plot runs/together6                                  # once the package is reinstalled
+    python -m f1sim.drivers.plot runs/run1 runs/run2 --out runs/compare.png
+    f1sim-plot runs                                            # the newest stage's log under runs/
 
-Each run is a stage B output directory (its stage-b-log.jsonl) or the .jsonl itself. The chunks are binned every
+Each run is an output directory (its newest stage-<b|c|d>-log.jsonl) or the .jsonl itself. The chunks are binned every
 `--window` environment steps: the share of learning seats alive, crashes per lap (the learners and the frozen cars),
 black flags, the reward per step and Q (in the config's units: divided by the run's reward scale), entropy and
 alpha; then the evals: crashes per lap and incidents per 100 km (with their 95% intervals) in the weekend race and
@@ -25,7 +25,10 @@ def read(path, profile: str = "middle"):
     and every row."""
     path = Path(path)
     if path.is_dir():
-        path = path / "stage-b-log.jsonl"
+        logs = sorted(path.glob("stage-*-log.jsonl"), key=lambda p: p.stat().st_mtime)
+        if not logs:
+            raise FileNotFoundError(f"no stage-*-log.jsonl in {path}")
+        path = logs[-1]  # the newest stage's
     start, chunks, evals = {}, [], []
     for line in path.read_text().splitlines():
         if not line.strip():

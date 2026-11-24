@@ -1,16 +1,14 @@
-"""Stage A training (Phase 2, section 3.2): one profile, one car per race, on the track-width curriculum.
+"""Stage A training (Phase 2, section 3.2), the first of the regime A-B-C-D (`stage_b`): Middle alone, one car per
+race, from scratch.
 
-    f1sim-train --profile middle --tracks tracks --preset cluster                 # Middle, from scratch
-    f1sim-train --profile smooth --tracks tracks --preset cluster                 # from Middle's stage A best
-    f1sim-train --profile middle --generate 4 --eval-tracks 2 --preset laptop     # no pool: a small smoke run
+    f1sim-train --tracks tracks                                   # Middle from scratch
+    f1sim-train --tracks tracks --init runs/middle/stage-a/latest.npz   # carry on after a stop
+    f1sim-train --generate 4 --eval-tracks 2 --steps 2000         # no pool: a small smoke run
 
-Each width (~26 m, ~20 m, then the 12-15 m tracks) trains until the eval stops improving for `patience` evals once
-cars finish races (or `steps_per_width`; `--patience 0` runs every width its full steps); the replay buffer and the networks carry on to the next width. The eval runs on the eval tracks
-at the same width. Everything is written to runs/<profile>/stage-a/: log.jsonl (every chunk and eval), latest.npz,
-best-<width>.npz and best.npz (the best eval on the 12-15 m tracks).
-
-Middle trains from scratch; Aggressive, Smooth and Defensive start from Middle's best stage A networks
-(`start_from` in their profile), with their own d, H0, gamma and rewards, and no random warm-up.
+It trains for `steps_a` environment steps, or until the eval stops improving for `patience` evals once cars finish
+races (`--patience 0`: never early). Everything is written to runs/middle/stage-a/: log.jsonl (every chunk and eval),
+latest.npz and best.npz, which stage B starts from. A run from scratch learns at once; one from a checkpoint
+(`--init`) fills part of its replay, then trains the critics alone first (`[warm_start]`, `loop.schedule`).
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ from .. import replay as rp
 from . import env as de
 from . import evaluate, rewards
 from .config import load
-from .tracks import Rotation, eval_tracks, rotate_races, widened
+from .tracks import Rotation, eval_tracks, rotate_races
 
 
 def stage_a_step(bank, state, action, key, cfg: de.EnvConfig, w):
@@ -72,28 +70,27 @@ def chunk_record(info, m, w, elapsed: float, steps: int, slots: int) -> dict:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Stage A: train a driver profile alone on the width curriculum.")
-    ap.add_argument("--profile", default="middle")
+    ap = argparse.ArgumentParser(description="Stage A: Middle alone on the track, from scratch.")
     ap.add_argument("--preset", default="laptop")
     ap.add_argument("--tracks", help="track pool directory (f1env-tracks --out ...)")
     ap.add_argument("--generate", type=int, default=0, help="no pool: generate this many training tracks")
     ap.add_argument("--eval-tracks", type=int, default=10, help="eval tracks used (the first n of the 10)")
-    ap.add_argument("--init", help="start from this checkpoint (default: the start_from profile's best stage A)")
-    ap.add_argument("--widths", help='override the curriculum, e.g. "normal" or "26,normal"')
-    ap.add_argument("--steps", type=int, help="override steps_per_width (environment steps)")
+    ap.add_argument("--init", help="carry on from this checkpoint (default: from scratch)")
+    ap.add_argument("--steps", type=int, help="override steps_a (environment steps)")
     ap.add_argument("--eval-every", type=int, help="override eval_every (environment steps)")
-    ap.add_argument("--patience", type=int, help="override patience (evals without a better one before the next width; 0: never stop early)")
+    ap.add_argument("--patience", type=int, help="override patience (evals without a better one before stopping; 0: never early)")
     ap.add_argument("--rotate-every", type=int, help="override rotate_every (environment steps; 0: keep one set of tracks)")
     ap.add_argument("--tracks-per-set", type=int, help="override tracks (two sets are on the GPU when rotating)")
     ap.add_argument("--replay", type=int, help="override replay (transitions)")
+    ap.add_argument("--critic-steps", type=int, help="override [warm_start] critic_steps (with --init; gradient steps; 0: the actor ramps up at once)")
     ap.add_argument("--out", default="runs")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
     if a.tracks is None and not a.generate:
         ap.error("give a track pool (--tracks) or --generate N")
 
-    s = load(a.profile, a.preset)
-    p, sa = s.preset, s.stage_a
+    s = load("middle", a.preset)
+    p = s.preset
     p.update({k: v for k, v in (("tracks", a.tracks_per_set), ("replay", a.replay)) if v})
     out = Path(a.out) / s.profile / "stage-a"
     out.mkdir(parents=True, exist_ok=True)
@@ -105,101 +102,79 @@ def main(argv=None):
 
     key = jax.random.PRNGKey(a.seed)
     k_agent, key = jax.random.split(key)
-    template = tqc.init(k_agent, s.tqc)
-    init = a.init or (str(Path(a.out) / s.start_from / "stage-a" / "best.npz") if s.start_from else None)
-    if init:
-        base, info = checkpoint.load(init, template, s.tqc)
+    agent = tqc.init(k_agent, s.tqc)
+    if a.init:
+        base, info = checkpoint.load(a.init, agent)
         agent = tqc.from_networks(s.tqc, base.actor, base.critic, base.target, base.log_alpha)
-        factor = s.reward_scale / float(info.get("reward_scale", 1.0))  # checkpoints before the reward scale: 1
-        if factor != 1.0:
-            agent = tqc.rescale(agent, factor)
-            print(f"{s.profile}: rewards x{factor:g} since that checkpoint: critics and alpha rescaled")
-        warmup = 0
-        print(f"{s.profile}: starting from {init} ({info.get('profile')}, {info.get('env_steps', 0):,} steps)")
-    else:
-        agent, warmup = template, int(sa["warmup"])
+        print(f"{s.profile}: carrying on from {a.init} ({info.get('env_steps', 0):,} steps)")
     slots = p["races"] * s.env.cars
-    replay = rp.new(rp.rows_for(p["replay"], slots), slots, de.OBS, de.ACTIONS)
-    warmup_steps = warmup // slots  # random actions
-    learn_from = max(int(sa["warmup"]) // slots, s.tqc.batch // slots + s.tqc.n_step + 1)  # a started profile drives its own policy meanwhile
+    rows = rp.rows_for(p["replay"], slots)
+    replay = rp.new(rows, slots, de.OBS, de.ACTIONS, de.storage_codec())  # inputs packed
+    ws = {**s.warm_start, **({} if a.critic_steps is None else {"critic_steps": a.critic_steps})}
+    plan = loop.schedule(bool(a.init), rows, slots, p["updates"], s.tqc.batch, s.tqc.n_step, ws["fill"], ws["critic_steps"], ws["actor_ramp"])
+    if a.init:
+        print(f"warm start: the replay fills to {100 * ws['fill']:.0f}% (step {plan.learn_from:,}), then the critics learn alone for {ws['critic_steps']:,} gradient steps (to step {plan.actor_from:,}), then the actor ramps up to full over {ws['actor_ramp']:,} (to step {plan.full_from:,})")
+    else:
+        print(f"from scratch: learning from step {plan.learn_from:,}")
     w = jnp.asarray(s.weights)
-    meta = {"reward_scale": s.reward_scale, **checkpoint.provenance(), "profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION, "styles": s.styles, "drop": s.tqc.drop, "gamma": s.tqc.gamma, "target_entropy": s.tqc.target_entropy, "init": init}
+    meta = {"reward_scale": s.reward_scale, **checkpoint.provenance(), "profile": s.profile, "preset": a.preset, "stage": "A", "eval_kind": "alone", "eval_laps": p["eval_laps"], "eval_version": evaluate.EVAL_VERSION, "init": a.init}
     print(f"{s.profile}: d={s.tqc.drop} ({s.tqc.drop * s.tqc.critics} of {s.tqc.critics * s.tqc.quantiles} atoms dropped)  H0={s.tqc.target_entropy}  gamma={s.tqc.gamma}  {p['races']} races x 1 car  replay {p['replay']:,}")
 
-    steps = jnp.zeros((), jnp.int32)
-    widths = a.widths.split(",") if a.widths else sa["widths"]
-    normal_eval = eval_tracks(a.tracks, "normal", a.eval_tracks)
+    eval_bank = make_bank(eval_tracks(a.tracks, "normal", a.eval_tracks))
     # an earlier run's best (same eval) stays the bar, so a new run's first eval can't overwrite a better checkpoint
-    best_overall = checkpoint.best_bar(out / "best.npz", stage="A", eval_kind="alone", eval_laps=p["eval_laps"], eval_version=evaluate.EVAL_VERSION)
-    if best_overall:
-        print(f"best so far on the normal tracks: {evaluate.summary(best_overall)}")
+    best = checkpoint.best_bar(out / "best.npz", stage="A", eval_kind="alone", eval_laps=p["eval_laps"], eval_version=evaluate.EVAL_VERSION)
+    if best:
+        print(f"best so far: {evaluate.summary(best)}")
+    rot = Rotation(a.tracks, "normal", a.generate or p["tracks"], seed=a.seed, generate=bool(a.generate))
+    bank = rot.bank
+    key, k_reset = jax.random.split(key)
+    env_state, obs = de.compiled("reset", s.env)(bank, k_reset, pick=rot.pick)
+    carry = loop.Carry(env_state, obs.reshape(slots, de.OBS), agent, replay, key, jnp.zeros((), jnp.int32))
+    chunk = loop.make_chunk(partial(stage_a_step, cfg=s.env, w=w), s.tqc, p["chunk"], p["updates"], 0, plan.learn_from, plan.actor_from, plan.full_from)
+    print(f"tracks: {rot.describe()}; {len(eval_bank.length)} eval tracks x {p['eval_seeds']} runs")
+    budget = a.steps or p["steps_a"]
+    eval_every = a.eval_every or p["eval_every"]
     rotate_every = p.get("rotate_every", 0) if a.rotate_every is None else a.rotate_every
-    patience = sa["patience"] if a.patience is None else a.patience
-    stop = StopFlag()
-    for i_width, width in enumerate(widths):
-        if stop.asked:
-            break
-        rot = Rotation(a.tracks, width, a.generate or p["tracks"], seed=a.seed + i_width, generate=bool(a.generate))
-        # the eval at a wide width: the eval tracks' copies that fit, each run more times so every width's eval has as
-        # many races; if none fit, the normal eval tracks
-        ev_tracks = widened(normal_eval, width)
-        if not ev_tracks:
-            print(f"width {width}: no eval track fits at this width; evaluating on the normal ones")
-            ev_tracks = normal_eval
-        eval_seeds = -(-p["eval_seeds"] * len(normal_eval) // len(ev_tracks))
-        bank, eval_bank = rot.bank, make_bank(ev_tracks)
-        key, k_reset = jax.random.split(key)
-        env_state, obs = de.compiled("reset", s.env)(bank, k_reset, pick=rot.pick)
-        carry = loop.Carry(env_state, obs.reshape(slots, de.OBS), agent, replay, key, steps)
-        chunk = loop.make_chunk(partial(stage_a_step, cfg=s.env, w=w), s.tqc, p["chunk"], p["updates"], warmup_steps, learn_from)
-        print(f"width {width}: {rot.describe()}, {len(ev_tracks)} eval tracks x {eval_seeds} runs")
-
-        budget = a.steps or p["steps_per_width"]
-        start = int(carry.steps)
-        eval_every = a.eval_every or p["eval_every"]
-        next_eval = start + eval_every
-        next_rotate = start + rotate_every if rot.rotates and rotate_every else None
-        best, stale = None, 0
-        t_width = time.time()
-        while int(carry.steps) - start < budget and (patience == 0 or stale < patience) and not stop.asked:
-            t0 = time.time()
-            carry, (info, m) = chunk(carry, bank)
-            jax.block_until_ready(carry.steps)
-            n = int(carry.steps)
-            rec = chunk_record(info, m, s.weights, time.time() - t0, p["chunk"], slots)
-            log({"kind": "chunk", "width": width, "env_steps": n, **rec})
-            alpha = f"  alpha {rec['alpha']:.3f}  q {rec['q']:7.1f}  H {rec['entropy']:5.2f}" if "alpha" in rec else "  (warming up)"
-            print(
-                f"[{width:>6}] {n:>9,} steps  {rec['env_steps_per_s']:6.0f}/s  reward/step {rec['reward_per_step']:6.3f}  "
-                f"crashes {rec['crashes']:3.0f}  laps {rec['laps']:4.0f}  off track {100 * rec['off_track_share']:4.1f}%  races {rec['races']:3.0f}{alpha}",
-                flush=True,
-            )
-            if next_rotate and n >= next_rotate:  # a fresh set of training tracks
-                next_rotate += rotate_every
-                bank, env_state, obs, hit = rotate_races(rot, carry.env, carry.obs.reshape(s.env.races, s.env.cars, de.OBS), jax.random.fold_in(carry.key, n), s.env)
-                replay_cut = rp.cut_last(carry.replay, jnp.asarray(np.repeat(hit, s.env.cars)))
-                carry = carry._replace(env=env_state, obs=obs.reshape(slots, de.OBS), replay=replay_cut)
-                print(f"  tracks: {rot.describe()}; {int(hit.sum())} races restarted", flush=True)
-            if n >= next_eval:
-                next_eval += eval_every
-                r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], eval_seeds, weights=s.weights)
-                log({"kind": "eval", "width": width, "env_steps": n, **r})
-                info_ckpt = {**meta, "width": width, "env_steps": n, "eval": r}
-                checkpoint.save(out / "latest.npz", carry.agent, info_ckpt)
-                improved = evaluate.better(r, best)
-                if improved:
-                    best, stale = r, 0
-                    checkpoint.save(out / f"best-{width}.npz", carry.agent, info_ckpt)
-                    if width == "normal" and evaluate.better(r, best_overall):
-                        best_overall = r
-                        checkpoint.save(out / "best.npz", carry.agent, info_ckpt)
-                elif best["finish_rate"] > 0:  # "stops improving" only counts once cars finish races
-                    stale += 1
-                note = "  (best)" if improved else (f"  (no better: {stale}/{patience or 'no limit'})" if best["finish_rate"] > 0 else "  (no better; nothing finishes yet)")
-                print(f"  eval at {width}: {evaluate.summary(r)}{note}", flush=True)
-        agent, replay, key, steps = carry.agent, carry.replay, carry.key, carry.steps
-        print(f"width {width} done: {int(steps) - start:,} steps in {(time.time() - t_width) / 60:.1f} min; best eval: {evaluate.summary(best) if best else 'none'}")
-    checkpoint.save(out / "latest.npz", agent, {**meta, "env_steps": int(steps)})
+    patience = s.stage_a["patience"] if a.patience is None else a.patience
+    next_eval, next_rotate = eval_every, (rotate_every if rot.rotates and rotate_every else None)
+    stale, t_start, stop = 0, time.time(), StopFlag()
+    while int(carry.steps) < budget and (patience == 0 or stale < patience) and not stop.asked:
+        t0 = time.time()
+        carry, (info, m) = chunk(carry, bank)
+        jax.block_until_ready(carry.steps)
+        n = int(carry.steps)
+        rec = chunk_record(info, m, s.weights, time.time() - t0, p["chunk"], slots)
+        log({"kind": "chunk", "env_steps": n, **rec})
+        alpha = f"  alpha {rec['alpha']:.3f}  q {rec['q']:7.1f}  H {rec['entropy']:5.2f}" if "alpha" in rec else "  (warming up)"
+        print(
+            f"{n:>9,} steps  {rec['env_steps_per_s']:6.0f}/s  reward/step {rec['reward_per_step']:6.3f}  "
+            f"crashes {rec['crashes']:3.0f}  laps {rec['laps']:4.0f}  off track {100 * rec['off_track_share']:4.1f}%  races {rec['races']:3.0f}{alpha}",
+            flush=True,
+        )
+        if next_rotate and n >= next_rotate:  # a fresh set of training tracks
+            next_rotate += rotate_every
+            bank, env_state, obs, hit = rotate_races(rot, carry.env, carry.obs.reshape(s.env.races, s.env.cars, de.OBS), jax.random.fold_in(carry.key, n), s.env)
+            replay_cut = rp.cut_last(carry.replay, jnp.asarray(np.repeat(hit, s.env.cars)))
+            carry = carry._replace(env=env_state, obs=obs.reshape(slots, de.OBS), replay=replay_cut)
+            print(f"  tracks: {rot.describe()}; {int(hit.sum())} races restarted", flush=True)
+        if n >= next_eval:
+            next_eval += eval_every
+            if n <= plan.actor_from:  # the actor hasn't moved yet: the same driver, the same eval
+                continue
+            r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], p["eval_seeds"], weights=s.weights)
+            log({"kind": "eval", "env_steps": n, **r})
+            info_ckpt = {**meta, "env_steps": n, "eval": r}
+            checkpoint.save(out / "latest.npz", carry.agent, info_ckpt)
+            improved = evaluate.better(r, best)
+            if improved:
+                best, stale = r, 0
+                checkpoint.save(out / "best.npz", carry.agent, info_ckpt)
+            elif best["finish_rate"] > 0:  # "stops improving" only counts once cars finish races
+                stale += 1
+            note = "  (best)" if improved else (f"  (no better: {stale}/{patience or 'no limit'})" if best["finish_rate"] > 0 else "  (no better; nothing finishes yet)")
+            print(f"  eval: {evaluate.summary(r)}{note}", flush=True)
+    checkpoint.save(out / "latest.npz", carry.agent, {**meta, "env_steps": int(carry.steps)})
+    print(f"stage A: {int(carry.steps):,} steps in {(time.time() - t_start) / 60:.1f} min; best eval: {evaluate.summary(best) if best else 'none'}")
     log_file.close()
 
 

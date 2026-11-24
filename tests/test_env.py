@@ -34,7 +34,7 @@ def run(bank, cfg, st, actions, key=0):
 
 def test_reset(started):
     cfg, st, obs = started
-    assert obs.shape == (3, 1, de.OBS) and de.OBS == 234
+    assert obs.shape == (3, 1, de.OBS) and de.OBS == 188
     assert np.isfinite(np.asarray(obs)).all()
     assert all(not getattr(a, "weak_type", False) for a in jax.tree.leaves(st))
     assert (np.asarray(st.race.orders.ers) == 2).all()  # ERS deploy
@@ -173,6 +173,17 @@ def test_field_sizes(bank):
     assert de.field(jax.random.PRNGKey(0), de.EnvConfig(races=2, cars=22)).all()  # no sizes: everyone
 
 
+def test_learners_first_fills_the_field_with_frozen_cars():
+    """learners_first: every learning seat races in every session, the frozen ones fill the bigger fields."""
+    learners = tuple(k < 6 for k in range(22))
+    cfg = de.EnvConfig(races=64, cars=22, field_sizes=(6, 12, 18, 22), learners=learners, learners_first=True)
+    present = np.asarray(de.field(jax.random.PRNGKey(5), cfg))
+    n = present.sum(axis=1)
+    assert set(n) == {6, 12, 18, 22}
+    assert present[:, :6].all()  # the 6 learners always race
+    assert (present[:, 6:].sum(axis=1) == n - 6).all()  # frozen cars make up the rest
+
+
 def test_spread_starts(bank):
     """A spread start puts the cars around the lap at speed, apart from each other, the lights out: they're driving
     (valid) from the first step, short of the line, and the first crossing starts lap 1."""
@@ -193,3 +204,67 @@ def test_spread_starts(bank):
     _, (obs2, valid, *_rest) = run(bank, cfg, st, a)
     assert np.asarray(valid)[0].all()
     assert np.isfinite(np.asarray(obs2)).all()
+
+
+def test_sensor_noise_only_in_training(bank):
+    """With sensor_noise the lidar and the cars around read within +-5% of the truth (the log-scaled lidar a bit less),
+    "nobody there" stays exact, and everything else is untouched; without it the inputs are exact."""
+    from f1env import observe
+
+    clean_cfg = de.EnvConfig(races=4, cars=22, race=de.RaceConfig(respawn=False))
+    noisy_cfg = clean_cfg._replace(sensor_noise=0.05)
+    st, obs = jax.jit(partial(de.reset, cfg=clean_cfg))(bank, jax.random.PRNGKey(8))
+    readings = observe.lidar(bank, st.race)
+    clean = np.asarray(de._inputs(bank, st.race, readings, st.last, st.flags, clean_cfg, jax.random.PRNGKey(1)))
+    noisy = np.asarray(de._inputs(bank, st.race, readings, st.last, st.flags, noisy_cfg, jax.random.PRNGKey(1)))
+    sl = observe.slices(observe.DRIVER_LAYOUT)
+    lid = slice(0, sl["lidar_barrier"].stop)
+    assert not np.allclose(noisy[..., lid], clean[..., lid]) and np.abs(noisy[..., lid] - clean[..., lid]).max() < 0.02
+    ahead = clean[..., sl["cars_ahead"]].reshape(4, 22, 3, 5)
+    got = noisy[..., sl["cars_ahead"]].reshape(4, 22, 3, 5)
+    nobody = ahead[..., 0] == 1.0
+    assert (got[nobody] == ahead[nobody]).all()
+    seen = ~nobody
+    assert seen.any() and np.allclose(got[seen][:, :3], ahead[seen][:, :3], rtol=0.051, atol=1e-6)
+    for name in ("car", "progress", "orders", "status", "tyres"):
+        assert (noisy[..., sl[name]] == clean[..., sl[name]]).all()
+
+
+def test_length_skew_draws_shorter_races(bank):
+    tid = jnp.zeros(4000, jnp.int32)
+    even = np.asarray(de.race_laps(bank, tid, jax.random.PRNGKey(1), de.EnvConfig(pit_share=0.0, min_laps=2)))
+    short = np.asarray(de.race_laps(bank, tid, jax.random.PRNGKey(1), de.EnvConfig(pit_share=0.0, min_laps=2, length_skew=3.0)))
+    assert even.min() >= 2 and short.min() >= 2 and short.max() <= even.max()
+    assert short.mean() < 0.6 * even.mean()
+
+
+def test_random_start_tyres_in_training_mediums_otherwise():
+    from f1env import tyres as ty
+    from f1env.sensors import make_bank
+    from f1sim.drivers.tracks import eval_track
+
+    bank = make_bank([eval_track("tracks", 0)])
+    base = de.EnvConfig(races=8, cars=22, race=de.RaceConfig(weather=__import__("f1env").weather.WeatherParams(rain_share=0.0)))
+    st, _ = de.compiled("reset", base)(bank, jax.random.PRNGKey(0))
+    assert bool(jnp.all(st.race.tyres.compound == ty.MEDIUM))
+    st, _ = de.compiled("reset", base._replace(start_tyres=(1.0, 1.0, 1.0)))(bank, jax.random.PRNGKey(0))
+    c = np.asarray(st.race.tyres.compound)
+    assert set(np.unique(c)) == {ty.SOFT, ty.MEDIUM, ty.HARD}
+    np.testing.assert_array_equal(np.asarray(st.race.tyres.used), 1 << c)
+
+
+def test_the_random_principal_gives_the_learners_orders(bank):
+    from f1env import orders as od
+
+    from f1sim.drivers import env as de
+
+    cfg = de.EnvConfig(races=4, cars=6, quali_share=0.0, learners=(True, True, True, False, False, False), random_orders=True, order_every=(1.0, 2.0))
+    st, obs = jax.jit(lambda k: de.reset(bank, k, cfg))(jax.random.PRNGKey(0))
+    step = jax.jit(lambda st, a, k: de.step(bank, st, a, k, cfg))
+    seen = set()
+    for i in range(400):
+        st, obs, out, info = step(st, jnp.zeros((4, 6, de.ACTIONS)), jax.random.PRNGKey(i))
+        o = st.race.orders
+        seen |= {("pace", int(x)) for x in np.unique(np.asarray(o.pace[:, :3]))} | {("team", int(x)) for x in np.unique(np.asarray(o.team[:, :3]))} | {("ers", int(x)) for x in np.unique(np.asarray(o.ers[:, :3]))}
+        assert np.all(np.asarray(o.pace[:, 3:]) == od.NORMAL) and np.all(np.asarray(o.team[:, 3:]) == od.NO_ORDER)  # the frozen cars get none
+    assert {("pace", od.PUSH), ("pace", od.SAVE), ("ers", od.ERS_SAVE)} <= seen and len({x for h, x in seen if h == "team"}) >= 2

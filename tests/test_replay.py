@@ -96,3 +96,37 @@ def test_a_batch_with_no_valid_step_is_flagged():
     for _ in range(4):
         buf = rp.add(buf, jnp.ones((2, 3)), jnp.zeros((2, 1)), jnp.ones(2), jnp.ones(2, bool), jnp.zeros(2, jnp.int8))
     assert bool(rp.sample(buf, jax.random.PRNGKey(0), 8, 3, G).ok)
+
+
+def test_packed_inputs_round_trip():
+    """8 bits over a fixed range (square-root scale where asked), float16 for the rest; values outside are clipped."""
+    spec = [(0.0, 1.0, True), (-2.0, 2.0, False), None, (0.0, 1.0, False)]
+    c = rp.make_codec(spec)
+    x = jnp.asarray([[0.0, -2.0, 1.2345, 0.0], [0.005, 0.37, -7.5, 0.5], [1.0, 2.0, 3.0, 1.0], [2.0, -9.0, 0.1, -1.0]])
+    y = np.asarray(rp.decode(c, rp.encode(c, x)))
+    assert np.allclose(y[:, 2], np.asarray(x[:, 2].astype(jnp.float16), np.float32))  # float16, exact
+    assert np.allclose(y[:3, 0], [0.0, 0.005, 1.0], atol=4e-4)  # near zero the root scale is fine
+    assert abs(y[1, 1] - 0.37) <= 4.0 / 255 / 2 + 1e-6
+    assert np.allclose(y[3, [0, 1, 3]], [1.0, -2.0, 0.0], atol=1e-6)  # clipped to the range
+    assert rp.bytes_per_step(4, 1, c) == 3 + 2 + 2 + 6 and rp.bytes_per_step(4, 1) == 8 + 2 + 6
+
+
+def test_a_packed_buffer_samples_decoded_inputs():
+    spec = [(0.0, 1.0, False)] * 3 + [None]
+    c = rp.make_codec(spec)
+    buf = rp.new(16, 2, 4, 1, c)
+    for t in range(16):
+        obs = jnp.full((2, 4), t / 16.0)
+        buf = rp.add(buf, obs, jnp.zeros((2, 1)), jnp.ones(2), jnp.ones(2, bool), jnp.zeros(2, jnp.int8))
+    b = rp.sample(buf, jax.random.PRNGKey(0), 32, 1, 0.9)
+    o = np.asarray(b.obs)
+    assert o.dtype == np.float32 and np.allclose(o[:, :3], o[:, 3:4], atol=1 / 255)
+    assert np.allclose(np.asarray(b.next_obs)[:, 3] - o[:, 3], 1 / 16.0)  # the next row
+
+
+def test_driver_inputs_packing():
+    from f1sim.drivers import env as de
+
+    c = de.storage_codec()
+    assert c.narrow.shape[0] + c.wide.shape[0] == de.OBS and c.wide.shape[0] == 14  # the car's state and the preview
+    assert rp.bytes_per_step(de.OBS, de.ACTIONS, c) == 218  # 216 before the stuck timer's 2 inputs (2026-11-16), 214 before the blend line's (2026-11-12)

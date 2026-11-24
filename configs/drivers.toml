@@ -5,16 +5,20 @@
 critics = 5                 # N
 quantiles = 25              # M: 125 atoms
 lr = 3e-4                   # actor, critics and alpha
-batch = 256
+batch = 512                 # 256 until 2026-11-11 (stage B: one gradient step per environment step, reuse ~5.3)
 tau = 0.005
-n_step = 5
-actor_hidden = [256, 256, 256]          # one more layer each since 2026-11-05 (older checkpoints load deepened:
-critic_hidden = [512, 512, 512, 512]    # identity layers, the same driver)
+n_step = 10                 # 0.5 s of real rewards before the critics fill in the rest with their own guess (5 until 2026-11-23; 30 and 20 collapsed: fix-n30, fix-n30fresh, fix-n20)
+actor_hidden = [256, 256, 256]
+critic_hidden = [512, 512, 512, 512]
+shared_encoder = true       # one input encoder for all the critics (nets.share_encoder): ~10% faster gradient steps; the
+                            # critics then differ only in their heads (user, 2026-11-24)
 init_alpha = 1.0
 
 [encoder]                   # every network's input branches (f1sim.nets.EncoderSpec)
-conv = [[32, 5, 2], [64, 3, 2]]    # lidar: (filters, width, stride) along the 50 beams, 3 channels
+conv = [[32, 5, 2], [64, 3, 2]]    # lidar: (filters, width, stride) along the 50 beams, 2 channels (edge, barrier)
 other_hidden = [128]               # the other ~59 inputs
+bf16 = true                        # the dense layers' products in bfloat16, weights and sums in float32: ~10% faster
+                                   # gradient steps, ~3 significant digits (user: approximate numbers are fine, 2026-11-24)
 
 [rewards]                   # base values per unit (f1sim.drivers.rewards); profiles multiply the style terms
 scale = 0.1                 # the weighted sum x this: the critics see a crash as -250, a step at reference pace +0.1
@@ -36,6 +40,7 @@ place_lost = -25.0          # per place (was -20)
 holding = 1.0               # per second, under attack
 inside_line = 2.0           # per second
 tyre_wear = -10.0           # per % of tyre life beyond the compound's rated wear
+tyre_save = 0.0             # per % of tyre life saved against the rated wear: only Smooth sets it (its [rewards])
 inputs = -0.05              # per unit of steer + throttle + brake change in a step
 slip = -0.5                 # per unit of wheelspin + lock-up + sliding past the tyres' peak in a step (was -0.2,
                             # without sliding: the trained drivers drifted, the rear past its peak 19% of cornering)
@@ -43,58 +48,123 @@ quali_place = 1.0           # qualifying, per standing point: 21 for P1 down to 
 quali_q2 = 3.0              # qualifying: in the top 16 (would move on to Q2)
 quali_q3 = 5.0              # qualifying: in the top 10 (would move on to Q3)
 quali_lap = 3.0             # qualifying: each new personal best lap, the first time included
+blue = -10.0                # per second shown the blue flag (being lapped, or owing a place gained under the safety car):
+                            # half a step's pay at reference pace, so moving over at once is cheap and holding the
+                            # leader up for the 3 corners to the warning is not (since 2026-11-15)
 standstill = -20.0          # per second stopped (under 1 m/s) on the track, unless queuing behind a moving car
+pull_away = 100.0           # per m/s gained within the stopped band (0-1 m/s), the same charged for slowing into it: a stop
+                            # and a start add up to 0. The first step of throttle from rest (~0.5 m/s) earns +50, as
+                            # standstill doesn't change in that step (Smooth parked under the safety car, 2026-11-16)
+waiting = 2000.0            # the whole waiting deposit: a car standing still pays it in as its wait level rises (-50 a second
+                            # scaled at first, most of it within 8 s) and gets all of it back on driving off; lost if its
+                            # race ends while it waits. About what a wait at a crash scene cost Smooth over the next
+                            # 2 minutes (-200 scaled), moved to where its critics can see it (2026-11-16)
 
 [env]                       # the races (f1sim.drivers.env.EnvConfig)
 min_laps = 5
 race_km = 305.0
 pit_share = 0.5             # at least half the races need a pit stop
-pit_km = 180.0              # a first set can't do more (mediums 200 km nominal, boxed at ~10%)
+pit_km = 115.0              # a first set can't do more (a medium does ~127 km, boxed at ~10%; was 180)
 time_factor = 2.5           # a race is cut at this x its lap-simulation time (bootstrapped)
 worn = [0.08, 0.12]         # the principal boxes each stint at this tyre life
 respawn = false             # a crashed car is out for the rest of its race (true: it rejoins from the pit exit after
                             # ~5 s as a new episode); off since 2026-11-01, so a crash isn't just a short setback
+march_steps = 64            # the lidar's sphere-tracing steps per beam (f1env: 128): the simulation ~35% faster, 0.07% of
+                            # beams read wrong by metres (2026-11-24); training and evals alike
+sensor_noise = 0.05         # training only: each sensed distance and speed (lidar, the cars around, mirrors,
+                            # alongside, the safety car) x U(0.95, 1.05) every step, so a driver can't count on exact
+                            # readings (v2 had lidar noise); evals see them exact
+crash_left_km = 0.0         # OFF since 2026-11-17 evening (run s9 at 0.059 got worse every eval: incidents 0.21 -> 0.64,
+                            # the critics' Q swung -12..+2 against ~10 in s8). At 0.059: a crash or black flag also costs this share of its own cost (-2500) per km of the race it
+                            # ends early, ~half the ~29.5 a km (scaled) a car earns: a lap-1 crash in a 120 km race
+                            # ~-2,000 scaled (at most -2,250: rewards.LEFT_CAP), on the last lap ~-250 as before. The critics see ~8 s ahead, so the rest
+                            # of the race a crash throws away was invisible to them: per step the safe s8-400k and the
+                            # crashier Middle earned the same (0.0768 / 0.0767, `runs/reward_split.py`, 2026-11-17)
 
-[stage_a]                   # alone, one car per race, on the track-width curriculum
-widths = ["26", "20", "normal"]    # m; "normal" is the 12-15 m tracks
-patience = 3                # evals without a better eval before moving on to the next width
-warmup = 10_000             # transitions before the first update: random actions, or the policy when starting from another profile
+[warm_start]                # how learning starts (loop.schedule). From scratch: at once, the fresh policy exploring.
+                            # From a checkpoint (a resume, another profile's networks, stage B from stage A):
+fill = 0.2                  # ... the replay first fills to this share with the loaded driver's driving,
+critic_steps = 20_000       # ... then the critics learn alone for this many gradient steps (the actor and alpha wait;
+                            # the driver keeps driving), then everything. 200k until 2026-11-07: with the actor frozen
+                            # that long the critics drift on every action the one driver doesn't take, and the stage A
+                            # driver alone fell apart 2k steps into the ramp (0 critic steps: it held, 72.6% vs 74.8%)
+actor_ramp = 100_000        # ... then the actor's and the temperature's steps grow linearly from 0 to full over this
+                            # many gradient steps (as a learning rate ramping up; v2: 100k), not all at once
 
-[stage_b]                   # the full grid, the four profiles learning together
-per_profile = 4             # learning cars per profile: 16 of 22, the other 6 (27%) frozen snapshots
-snapshots = 8               # frozen snapshot pool: starts with the stage A bests
-snapshot_every = 100_000    # environment steps between copies of a profile's actor into the pool (in turn)
+[stage_a]                   # A: Middle alone, one car per race, from scratch, on the pool's 22 m tracks
+patience = 3                # evals without a better eval before stage A stops (0: never early)
+
+[stage_b]                   # B: Middle in a field with every rule (f1sim-train-b --stage b); C and D build on it
+per_profile = 4             # learning cars per profile x 4 profiles' worth: Middle alone takes all 16 of 22, D's three 5 each
+snapshots = 8               # frozen snapshot pool: starts with the starting drivers (or --pool-seed's checkpoints); each
+                            # snapshot drives an equal share of the frozen cars
+snapshot_on = "best"        # each new best eval's driver replaces the oldest snapshot of its own personality ("none": the
+                            # pool stays as it starts). Copies every N steps turned the frozen field aggressive (b4c, 2026-11-13)
+eval_first = true           # a run with no bar for its eval kind evals its starting drivers at step 0 to set it
+# sc_band_kmh = 15.0        # the safety car's queue limit this much over its 155 km/h; unset: f1env's own (15)
+revive = true               # hidden units of the heads that fire on no replay row are made new at a run's start and before
+                            # every eval (f1sim.revive): the drivers compute what they did, the units can learn again
 quali_share = 0.2           # sessions that are short qualifying sessions
 quali_s = 720.0             # their length (Q3's 12 minutes), two runs each
-warmup_steps = 2_000        # environment steps before the first update (the replay fills with this run's driving)
-critic_warmup = 30_000      # gradient steps on the critics alone first (the actor and alpha wait), so the critics
-                            # learn this run's rewards before the driver follows them
-store_share = 0.25          # learning seats stored in the replay (a quarter: the same buffer covers 4x the time)
-eval_reference = "runs/reference/middle-together-250k.npz"   # the eval's fixed field in the odd cars ("none": off): a
-                            # driver that has raced in traffic (stage A's best crashed on lap 1 in 89-98% of its cars)
-solo_laps = 20              # each eval also runs every profile alone on the eval tracks for this many laps
-field_sizes = [6, 12, 18, 22] # cars per session, one drawn per session (the learning seats keep their 16/22 share):
-                            # fewer cars, fewer pile-ups; v2 trained on 3-car races (since 2026-11-06; was always 22)
+store_share = 1.0           # learning seats stored in the replay: all
+reuse = 5.34                # each stored step is sampled this many times on average: the gradient steps per environment
+                            # step follow from it (one per step at batch 512 with 16 races x 6 stored seats)
+lr = 5e-5                   # critics and alpha (3e-4 in stage A): larger steps made the critics' Q swing
+actor_lr = 3e-5             # the actor alone: smaller steps, the current actor swung (crashed 3.3x its average, 2026-11-13)
+learners_first = true       # every learning car in every session, frozen cars filling bigger fields
+actor_ramp = 25_000         # gradient steps the actors ramp up over after the critics' warm-up ([warm_start]'s: 100k)
+eval_every = 100_000        # environment steps between evals
+kappa = 300.0               # the critics' quantile Huber cut-off (TQCConfig's default 1): squared loss for any scaled
+                            # error, so rare crashes count at their size (at 1 a 1% crash chance looked free, 2026-11-18)
+eval_seeds = 2              # each eval track twice, two weekends side by side (user, 2026-11-24: 5 tracks x 2; one
+                            # weekend swung too much, 2026-11-17, and a second costs ~10% more time: the GPU is far
+                            # from full at 5-10 races)
+eval_tracks = [1, 6, 8, 2, 0] # the eval tracks by number (user, 2026-11-24): short (eval-01, 3.5 km, 57 s), mid (06, 4.6 km,
+                            # 70 s), long (08, 6.3 km, 116 s), twisty (02, 4.2 corners a km) and straights (00, 56% of the
+                            # lap at full speed, a 1.2 km straight); 09 left out: as long and twistier, its 125 s lap would
+                            # set the whole batch's race clock
+actor_average = 100_000     # the frozen cars' snapshots and the evals take the actor's weights averaged with this
+                            # half-life (steps; 0: the training actor itself); training and the checkpoints keep the current actor
+replay = 4_000_000          # transitions in the replay with one profile learning (more: the preset's replay_b): 0.86 GB;
+                            # 4.5M ran the GPU out of memory (2026-11-11)
+stuck_s = 90.0              # the stuck rule's time (f1env: 6 s), in training and the eval: a car beached in a gravel trap
+                            # has time to drive out
+stuck_track_s = 6.0         # ... but a car stopped on the track is out after this long: Smooth learned to park under
+                            # the safety car when the time-out lay beyond its critics' ~8 s view (2026-11-15)
+field_sizes = [6, 12, 18, 22] # cars per session, one drawn per session (the learning seats keep their share)
 spread_share = 0.5          # races that start with the cars spread around the lap at speed (the rest: on the grid),
 spread_speed = [0.6, 0.9]   # ... each at this x the reference pace where it starts: racing without a lap-1 pile-up
-entropy_shift = -5.0        # each profile's target entropy (H0) in stage B is this much lower: less action noise, so
-                            # training drives closer to the noise-free eval (at -1 together5's noisy learners crashed
-                            # 3-5x as often per lap as frozen copies of their start driving the mean action)
+entropy_shift = -3.0        # each profile's target entropy (H0) here is this much lower than in stage A (Middle -2 -> -5)
+entropy_ramp = 500_000      # ... reached linearly over this many environment steps from the actor's start
+                            # (H0 -7 at once wrecked the stage A driver, 2026-11-07)
+
+[stage_b.best_order]        # each profile's checks for a new best, in order: the first that decides (outside its band)
+                            # wins, else the reward per step (`evaluate.better_ordered`, user's orders 2026-11-21/22).
+                            # incidents: not riskier than the reference field in the same races beyond the noise;
+                            # cap:k: ... than k x its incidents; incidents_vs_best: fewer than the best (across evals);
+                            # pace: clean race pace against the reference's (0.6%); attack_success: the share of
+                            # spells within 1 s of the car ahead ending in a pass (3 points); attacks_held: the share
+                            # of spells under attack without losing the place (2 points); tyres: km per set (5%);
+                            # orders (C, D): the order terms' cost per 100 km (10%); distance: of the scheduled laps
+                            # (2%); points: per race (0.1)
+middle = ["incidents", "pace", "incidents_vs_best", "distance", "points"]  # safety floor vs the reference, then pace
 
 [preset.laptop]             # RTX 3050 Ti, 4 GB (the trainers let JAX use 92%, ~3.4 GB): stage A peaks at ~2.8 GB in use
 races = 64                  # stage A: one car per race; a step costs about the same for 8 or 256 races
-replay = 2_000_000          # transitions (~0.43 KB each)
+replay = 4_000_000          # transitions, 216 bytes each (inputs packed, replay.Codec): 0.86 GB (214 until 2026-11-12); was 2M at 484 bytes
+                            # (234 float16 inputs) until 2026-11-06
 tracks = 20                 # training tracks in a set; two sets on the GPU (~24 MB a track); 32 ran out after an hour
 rotate_every = 100_000      # environment steps between fresh sets of tracks, so a run works through the pool
 chunk = 1000                # environment steps per jitted call (and per log line)
 updates = 1                 # gradient steps per environment step
 eval_every = 50_000         # environment steps (stage A)
-eval_every_b = 50_000       # stage B: a full weekend per eval track (Q1-Q3, then the race)
+eval_every_b = 100_000      # stages B-D when [stage_b] has no eval_every: a weekend per eval track (one-lap qualifying, then the race)
 eval_laps = 50              # every eval race
 eval_seeds = 1
-steps_per_width = 400_000   # at most, environment steps
+steps_a = 400_000           # stage A, at most, environment steps
 races_b = 16                # stage B: races per batch (x 22 cars), 64 learning cars per profile
-replay_b = 500_000          # stage B: per profile (four of them)
+replay_b = 1_100_000        # stage B: per profile, 0.24 GB each: 4.4M for the four, 0.94 GB, what together6's 2M took
+                            # (it peaked at 3.6 of the ~3.77 GB JAX may use); one profile alone: [stage_together] replay
 steps_b = 200_000
 
 [preset.cluster]            # the real runs
@@ -108,7 +178,26 @@ eval_every = 50_000
 eval_every_b = 100_000
 eval_laps = 50
 eval_seeds = 2
-steps_per_width = 5_000_000
+steps_a = 5_000_000
 races_b = 64                # ~1,400 cars per step
 replay_b = 1_000_000
 steps_b = 5_000_000
+
+# ---- the training regime (user, 2026-11-24): A Middle alone; B Middle in a field, every rule; C Middle obeying team
+# orders; D each personality from Middle's C best. f1sim-train-b --stage b / c / d (each from the stage before's best)
+
+[stage_c]                   # stage C (and D): stage B's races, these keys replaced; a random principal gives the
+                            # learners team orders in races (`env.random_orders`), paid by the order terms (rewards)
+order_every = [30.0, 90.0]  # s between one head's orders (pace, team, ERS), drawn per order
+order_rest = 0.5            # the share of draws that are "no order" (pace normal, no team order, ERS deploy)
+
+[stage_c.best_order]        # as [stage_b.best_order], with "orders": the order terms' cost per 100 km (10% apart)
+middle = ["incidents", "orders", "pace", "incidents_vs_best", "distance", "points"]
+
+[stage_d]                   # stage D: stage C's races (orders on), the personalities learning from Middle's C best
+
+[stage_d.best_order]        # each personality's checks, its stage B order with the orders after the first check
+smooth = ["incidents_vs_best", "orders", "tyres", "distance", "points"]
+middle = ["incidents", "orders", "pace", "incidents_vs_best", "distance", "points"]
+aggressive = ["pace", "orders", "incidents_vs_best", "attack_success", "distance", "points"]
+defensive = ["attacks_held", "orders", "incidents_vs_best", "pace", "distance", "points"]

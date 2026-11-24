@@ -8,19 +8,20 @@ from f1sim.drivers.config import CONFIGS, PROFILES, load
 def test_every_profile_loads(preset):
     for p in PROFILES:
         s = load(p, preset)
-        assert s.tqc.obs_dim == 234 and s.tqc.act_dim == 5 and s.tqc.critics * s.tqc.quantiles == 125
+        assert s.tqc.obs_dim == 188 and s.tqc.act_dim == 5 and s.tqc.critics * s.tqc.quantiles == 125
 
 
 def test_profiles_match_the_spec():
-    spec = {  # d, H0, gamma, start from, (overtake, place lost, holding, inside line, tyre wear, smoothness)
-        "middle": (2, -2.0, 0.994, "", (1, 1, 1, 0, 1, 1)),
-        "aggressive": (1, -1.5, 0.990, "middle", (2, 0.6, 0.5, 0, 0.5, 0.5)),
-        "smooth": (3, -2.5, 0.996, "middle", (0.5, 1, 0.5, 0, 2, 1.5)),
-        "defensive": (2, -2.0, 0.992, "middle", (0.5, 1.8, 2, 1, 1, 1)),
+    spec = {  # d, H0, gamma, (overtake, place lost, holding, inside line, tyre wear, smoothness, car close, wall close);
+        # tyre wear 0.3 for the racing profiles since the tyre recalibration (2026-11-22)
+        "middle": (2, -2.0, 0.994, (1, 1, 1, 0, 0.3, 1, 1, 1)),
+        "aggressive": (1, -1.5, 0.990, (2, 0.6, 0.5, 0, 0.3, 0.5, 0.5, 1)),
+        "smooth": (3, -2.5, 0.994, (0.5, 1, 0.5, 0, 6, 1.5, 1.5, 1.5)),
+        "defensive": (2, -2.0, 0.992, (0.5, 1.8, 2, 1, 0.3, 1, 2, 1.5)),
     }
-    for name, (d, h0, gamma, start, mult) in spec.items():
+    for name, (d, h0, gamma, mult) in spec.items():
         s = load(name)
-        assert (s.tqc.drop, s.tqc.target_entropy, s.tqc.gamma, s.start_from) == (d, h0, gamma, start)
+        assert (s.tqc.drop, s.tqc.target_entropy, s.tqc.gamma) == (d, h0, gamma)
         assert tuple(s.styles[k] for k in rewards.STYLES) == mult
 
 

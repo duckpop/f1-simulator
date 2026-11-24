@@ -86,3 +86,25 @@ def test_a_tie_is_not_a_lead_and_no_laps_reads_plainly():
     alone = {"middle": {"finish_rate": 0.0, "crashes_per_lap": 10.0, "laps": 0.0, "lap_ratio": 0.0, "laps_per_stint": 0.0}}
     text = season.report(alone, None, {}, {})
     assert "no lap done" in text and "1000" not in text
+
+
+def test_attack_spells_count_a_pass_as_a_success():
+    import jax.numpy as jnp
+    from f1sim.drivers import season
+    a = season.Attacks(jnp.array([False]), jnp.array([0.0]), jnp.array([0.0]))
+    for attacking, gained in ((True, 0), (True, 0), (True, 1), (False, 0), (True, 0), (False, 0)):  # a pass, then a try that failed
+        a = season.track_attacks(a, jnp.array([attacking]), jnp.array([gained]))
+    assert float(a.count[0]) == 2 and float(a.lost[0]) == 1
+
+
+def test_a_crash_while_defending_counts_as_an_attack_lost():
+    import jax.numpy as jnp
+    from f1sim.drivers import season
+    a = season.Attacks(jnp.array([False]), jnp.array([0.0]), jnp.array([0.0]))
+    for attack, out in ((True, False), (True, False), (False, True)):  # under attack, then out of the race (no longer under attack)
+        a = season.track_attacks(a, jnp.array([attack]), jnp.array([0]), jnp.array([out]))
+    assert float(a.count[0]) == 1 and float(a.lost[0]) == 1
+    b = season.Attacks(jnp.array([False]), jnp.array([0.0]), jnp.array([0.0]))
+    for attack in (True, True, False):  # the same spell, survived
+        b = season.track_attacks(b, jnp.array([attack]), jnp.array([0]), jnp.array([False]))
+    assert float(b.lost[0]) == 0

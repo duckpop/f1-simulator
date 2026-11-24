@@ -15,8 +15,8 @@ and a scripted principal calls the pit stops. Phases 3 (principals) and 4 (desig
 | 2. Replay buffer on the GPU: float16, n-step returns | done |
 | 3. Training setup: random upgrades per car, the training principal, race and session sampler | done (20% qualifying sessions in stage B) |
 | 4. Rewards: common and style terms, each logged | done |
-| 5. Stage A: alone, on the track-width curriculum | runs on the laptop; the real runs are for the cluster |
-| 6. Stage B: full grid, mixed profiles, frozen snapshots | runs on the laptop (smoke runs); the real runs are for the cluster |
+| 5. Stage A: Middle alone, from scratch | ready (restart from scratch, 2026-11-24) |
+| 6. Stages B-D: B Middle in a field with every rule, C Middle obeying team orders, D the personalities from Middle | ready (2026-11-24) |
 | 7. Eval harness | done: alone, mixed races (stage B's pick), a 24-race season of full weekends, style metrics |
 | 8. Results against v2 | `f1sim-season` writes the report and checks the done criteria; it needs trained drivers |
 
@@ -37,24 +37,20 @@ Working on f1env at the same time? Install your local copy over the pinned one: 
 
 ```bash
 f1sim-check-tqc                                   # TQC on the pendulum swing-up: a few minutes, should pass
-f1env-tracks --out tracks --train 500 --eval 10   # the track pool, with the wide copies (once)
-f1sim-train --profile middle --tracks tracks --preset cluster
-f1sim-train --profile smooth --tracks tracks --preset cluster    # starts from Middle's best (and the other two)
-f1sim-train --profile middle --tracks tracks --init runs/middle/stage-a/best.npz --widths normal --steps 1000000 --patience 0
-                                                  # carry on at one width for a fixed number of steps (no early stop)
+f1env-tracks --out tracks --train 500 --eval 10 --width 22 --no-wide   # the track pool: every track 22 m wide (once)
+f1sim-train --tracks tracks                       # A: Middle alone, from scratch -> runs/middle/stage-a/best.npz
+f1sim-train-b --stage b --tracks tracks           # B: Middle in a field, every rule, pit stops (from A's best)
+f1sim-train-b --stage c --tracks tracks           # C: Middle obeying random team orders (from B's best)
+f1sim-train-b --stage d --tracks tracks           # D: Smooth, Aggressive, Defensive, each from Middle's C best
+f1sim-train-b --stage b --tracks tracks --resume  # after a stop: carry on from this stage's latest.npz
 f1sim-eval --checkpoint runs/middle/stage-a/best.npz --tracks tracks --laps 50
-f1sim-train-b --tracks tracks --preset cluster    # stage B: all four together, each from its stage A best
-f1sim-train-b --tracks tracks --preset cluster --resume   # after a stop: each profile from its stage B latest.npz
-f1sim-train-b --tracks tracks --init smooth=runs/middle/stage-b/best.npz   # one profile from a given checkpoint
-f1sim-train-b --tracks tracks --profiles middle --out runs/together --init middle=runs/middle/stage-a/best.npz --replay 2000000
-                                                  # one profile on the full grid: 16 learning, 6 frozen earlier copies
 f1sim-season --tracks tracks                      # Phase 2's evaluation and the comparison with v2
-python -m f1sim.drivers.plot runs/together5 runs/together6 --out runs/compare.png
-                                                  # stage B curves, runs overlaid at matching steps (an A/B)
+python -m f1sim.drivers.plot runs --out runs/curves.png
+                                                  # the newest stage's curves (several run directories: overlaid)
 ```
 
 Without a pool, `--generate N` makes N training tracks on the spot (and the eval tracks from their seeds), for small
-runs: `f1sim-train --profile middle --generate 4 --eval-tracks 2 --widths normal --steps 20000`.
+runs: `f1sim-train --generate 4 --eval-tracks 2 --steps 20000`.
 
 `pytest -q` runs the tests (~3 minutes); `pytest -m slow` adds the pendulum check.
 
@@ -66,7 +62,7 @@ pessimistic, so the driver avoids risk (`src/f1sim/tqc.py`).
 
 | Part | Setting |
 |---|---|
-| Inputs | f1env's 234 driver inputs: the lidar (50 beams x edge, closing speed, barrier) through a 1D conv along the beams, the other 84 through an MLP (128), joined. The last 25 (the cars around, the safety car) were added 2026-11-05: older checkpoints load with them at zero weight |
+| Inputs | f1env's 188 driver inputs: the lidar (50 beams x edge, barrier, each on a log scale: log(1 + d / 5 m) / log(1 + 390 / 5)) through a 1D conv along the beams, the other 88 through an MLP (128), joined. The last 4 (the blend line 2026-11-12, the stuck timer and the wait level 2026-11-16) were appended: older checkpoints load with them at zero weight. The 25 before the last (the cars around, the safety car) were added 2026-11-05: older checkpoints load with them at zero weight. The lidar's closing speeds (50) were removed 2026-11-06: an older checkpoint loads without that channel, but its lidar now reads a different scale, so it has to relearn it |
 | Actor | 256 · 256 · 256, a tanh-squashed Gaussian over 5 actions; the mean action in evals |
 | Critics | 512 · 512 · 512 · 512 each, the 5 batched with `vmap`, the action joined after the encoder |
 | Older checkpoints | one layer fewer each (until 2026-11-05): `checkpoint.load(..., cfg)` deepens them with identity layers before each output, so they drive exactly as before and learn on with the extra depth (~4% slower training) |
@@ -104,6 +100,10 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
   (`spread_share`) start with the cars spread around the lap at 0.6-0.9x the reference pace, lights out, in a random
   order, instead of a standing start on the grid.
 - Every car gets random upgrade levels each race (each category 0-10, per car).
+- Sensor noise in training (`[env] sensor_noise`, 0.05): every step each sensed distance and speed is off by up to
+  5% (the lidar's edge and barrier distances, and the gaps, offsets and speeds of the cars around, in the mirrors and
+  alongside, and the safety car's), so a driver can't count on exact readings; "nobody there" stays exact and the
+  evals see everything exact.
 - **The training principal** (`principal.py`) boxes each stint at a tyre life drawn from 8-12%, for the next-harder
   compound; wets a lap before rain, slicks a lap before the track is dry enough; pace normal, no team orders, ERS
   "deploy".
@@ -114,67 +114,30 @@ GPU (the env step, the replay and the gradient steps run together in one `lax.sc
 - The replay stores each step once per car (inputs in float16) with whether the driver was in control and how the step
   ended; n-step returns and the next inputs are found when sampling (`src/f1sim/replay.py`).
 
-**Stage A** (`train.py`): one car per race, on wide copies of the tracks first (~26 m, then ~20 m), then the 12-15 m
-tracks, moving on when the eval (50 laps alone on each eval track, every 50k steps on the laptop) stops improving once cars finish races (until then, at the width's step
-budget; `--patience 0`: always the full budget). The eval scores the share of the scheduled distance completed, then,
-within 2% of it, the profile's reward per step under its own weights (`evaluate.better`). Middle trains first, from scratch; the other three start
-from its best stage A networks with their own settings and rewards. The eval at a wide width runs on the eval tracks'
-wide copies that fit (at 26 m only 2 of the 10 do, at 20 m 5), each run more times so every width's eval has as many
-races; if none fit, it runs on the normal ones.
+**The training regime** (the user's, 2026-11-24; old models deleted, their evals in archive/runs-before-2026-11-24/):
+only Middle learns until D, then the personalities branch off it.
 
-**Stage B** (`stage_b.py`): up to 22 cars per race on the 12-15 m tracks, with overtaking, dirty air, slipstream, DRS,
-contact, the safety car and blue flags.
+- **A** (`train.py`, `f1sim-train`): Middle alone, one car per race on the pool's 22 m tracks, from scratch, until
+  the eval (50 laps alone on each eval track) stops improving for `patience` evals once cars finish races.
+- **B** (`stage_b.py --stage b`): Middle in fields of 6-22 cars with every rule (overtaking, contact, the safety car,
+  flags, pit stops, rain), against frozen snapshots of its own earlier bests, from its A best.
+- **C** (`--stage c`, `[stage_c]`): B's races plus a random principal giving Middle team orders every 30-90 s (pace
+  push/save, hold position, let the team-mate past, defend, ERS deploy/save; "no order" half the time), paid by the
+  order reward terms; from its B best.
+- **D** (`--stage d`, `[stage_d]`): C's races with Smooth, Aggressive and Defensive learning, each from Middle's C best.
 
-- Fields of 6 to 22 cars, and half the races from spread starts (above): with every race a 22-car standing start
-  (to together6, 2026-11-06) the learners lasted ~1.8 laps, mostly lap-1 pile-ups and the safety car periods they
-  bring, where nearly every black flag came from (speeding under it); their driving got worse (lone wall crashes ~6x
-  the reference driver's). v2 trained on 3-car races.
-
-- Seats are fixed by car number (the grid is random every race): 4 cars of each profile learn (16), team-mates are
-  different profiles, and the other 6 cars (27%) drive frozen snapshots.
-- Each profile keeps its own networks, optimisers and replay buffer. One batch of races trains all four: each car's
-  steps go to its profile's buffer with its profile's reward weights, and every profile takes its gradient steps each
-  environment step.
-- The snapshot pool (8) starts with the four stage A bests and takes a copy of one profile's current actor, in turn,
-  every 100k steps. A frozen car drives one snapshot (its mean action) for a whole session.
-- Each profile's target entropy is 5 lower than in stage A (`entropy_shift`; Middle's H0 -7): less action noise. With
-  stage A's noise a driver's tyres lasted half as long as without it, and at -1 lower the noisy learners of
-  together5 crashed 3-5x as often per lap as frozen copies of their starting networks driving the mean action (in
-  together4 about as often: the noise is a suspect, not proven).
-- A quarter of each profile's learning seats go to its replay (`store_share`), so the same buffer covers ~26 minutes
-  of racing instead of ~6.5; a batch draws 16 candidate rows per sample, and a batch with no step the driver
-  controlled is skipped rather than learned from.
-- Starting from a checkpoint of the same shape, the optimisers carry on; one saved under another reward scale has its
-  critics' outputs and alpha rescaled. Learning starts after `warmup_steps` (2,000) environment steps, and the critics
-  learn alone for the first `critic_warmup` (30,000) gradient steps, so they price this run's rewards before the actor
-  follows them.
-- A log line every 1,000 steps per group: the share of its seats alive, crashes (per lap, and how many it was hit
-  in), black flags, laps, overtakes, and for a learning profile its reward per step (scaled), Q, alpha and entropy.
-- 20% of sessions are 12-minute qualifying sessions: every car starts in its garage and goes out twice on new softs
-  (f1env's default runs), so flying laps and the "session" input get learned. A run ends when the car parks.
-- The eval is a full weekend on every eval track, as in F1: Q1, Q2 and Q3 set the grid, then a 50-lap race (`eval_laps`),
-  the default car, no respawn. The even cars are the learning profiles in turn, the odd ones (one in every team) a
-  fixed reference driver (`eval_reference`: the together run's 250k best, a Middle that has raced in traffic,
-  `runs/reference/`; Middle's stage A best, which never had, crashed on lap 1 in 89-98% of its cars), so points mean the
-  same from eval to eval and run to run, and a profile can't look better because another got worse. Reported: points
-  per race, the distance completed, the reward per step under the profile's own weights, finish rate, out on lap 1,
-  crashes per lap, time off the track, overtakes, places lost and attacks held; then each profile alone on the eval
-  tracks for 20 laps (`solo_laps`): pace, tyre life, crashes apart from the field. Both report incidents (crashes and
-  black flags) per 100 km on the track with a 95% interval. Each profile keeps its best checkpoint
-  (`evaluate.better_mixed`: fewer incidents per 100 km in the race beyond the noise; within it, more than 0.1 more
-  points per race against the reference, else the distance completed, else its reward per step) in
-  `runs/<profile>/stage-b/best.npz`. It runs every `eval_every_b` steps (50k on the laptop). Bests from evals before
-  2026-11-05 measured other things and aren't a bar for the new ones. A new run should start from `latest.npz`: a
-  best picked from noisy evals is partly luck.
-- Checkpoints and the log's start record carry the git commit, whether the code had uncommitted changes, and a hash
-  of the configs.
+Stages B-D start from a checkpoint, so each fills part of its replay and trains the critics alone first (`[warm_start]`).
+Their eval is a weekend on every eval track, a one-lap qualifying then the race (in C and D with orders for every car) against a reference field:
+the stage's starting Middle, frozen, so a best means better than where the stage started. Details: `stage_b.py`'s
+docstring and the comments in `configs/drivers.toml`. Speed options in the config: one encoder shared by the critics
+(`[tqc] shared_encoder`), bfloat16 dense layers (`[encoder] bf16`), 64 lidar steps per beam (`[env] march_steps`).
 
 ## Watching a driver
 
 ```bash
 f1sim-watch --tracks tracks                          # Middle's current best, alone, on eval track 0, live
 f1sim-watch --tracks tracks --cars 22 --track 3      # the same driver in all 22 cars
-f1sim-watch --tracks tracks --save                   # also save the race as runs/watch/<profile>-<track>-<width>.html
+f1sim-watch --tracks tracks --save                   # also save the race as runs/watch/<profile>-<track>.html
 f1sim-watch --tracks tracks --no-window              # no window (on the cluster): only the HTML replay
 f1sim-watch --profile smooth --tracks tracks         # any profile; or --checkpoint <file>
 f1sim-watch --tracks tracks --profiles middle,aggressive,defensive --save   # 22 cars, car k drives profile k mod 3,
@@ -193,15 +156,15 @@ removed). It runs on the CPU by
 default (`--device gpu` to change), where one race is quick (about 1 ms a step alone, 4 ms with 22 cars), so it neither
 slows down nor queues behind a training run on the GPU: ~30 frames/s with 22 cars on the laptop.
 
-The default driver is the profile's newest best checkpoint (stage B's, else stage A's best, else the newest
-`best-<width>.npz` while the curriculum is still on the wide tracks), at the width it was saved at; at 26 m only eval
-tracks 3 and 7 have a wide copy, other tracks fall back to the normal width. It uses the mean action, the default car and
-the training principal; add `--respawn` to let crashed cars rejoin as in training.
+The default driver is the profile's newest best checkpoint along the regime (stage D's, else C's, B's, A's, else stage
+A's latest). It uses the mean action, the default car and the training principal; add `--respawn` to let crashed cars
+rejoin.
 
 ## Evaluation
 
 `f1sim-season` (`src/f1sim/drivers/season.py`) runs Phase 2's tests on the 10 fixed eval tracks with the default car
-(no upgrades) and each profile's best checkpoint (stage B, else stage A), driving the actors' mean actions:
+(no upgrades) and each profile's newest best checkpoint (stage D, else C, B, A; Middle's for a personality with none
+yet), driving the actors' mean actions:
 
 | Test | What's measured | v2 to beat |
 |---|---|---|
@@ -247,6 +210,9 @@ separately (`runs/<profile>/stage-a/log.jsonl`).
 | Qualifying place: 21 points for P1 down to 0 for P22 (no time: 0) | +1 per point | | | | |
 | Qualifying: in the top 16 (would move on to Q2) / in the top 10 (Q3) | +3 / +5 | | | | |
 | Qualifying: a new personal best lap (the first time included) | +3 | | | | |
+| Launch: in the 2 s after the lights go out at a standing start, seconds of throttle with the brake fully off | +20 per s | | | | |
+| Car close call: seconds at its level, 1 - time to contact / 0.4 s, from every other car's gap and closing speed (wrecks too) | -20 per s | 1x | 0.5x | 1.5x | 2x |
+| Barrier close call: the same to the nearest barrier | -20 per s | 1x | 1x | 1.5x | 1.5x |
 
 The qualifying terms are paid as the standing changes, not at the flag (minutes away, far beyond any horizon): a car
 gets a place's points when its lap puts it there and gives them back when another car's lap pushes it down while it's

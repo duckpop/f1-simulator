@@ -43,3 +43,10 @@ def test_wets_for_rain(bank):
 def test_orders_fixed(bank):
     o = principal.fixed_orders(race(bank)).orders
     assert (np.asarray(o.ers) == od.DEPLOY).all() and (np.asarray(o.pace) == od.NORMAL).all() and (np.asarray(o.team) == od.NO_ORDER).all()
+
+
+def test_short_races_skip_the_two_compound_stop(bank):
+    st = race(bank, laps=1)  # on the grid of a 1-lap race: "late" already, still on its first compound
+    assert (calls(bank, st, 0.10) == 1 + ty.HARD).all()  # the two-compound stop
+    short = np.asarray(principal.calls(bank, st, jnp.full((2, 1), 0.10), RaceConfig(), two_compound_km=50.0))[:, 0]
+    assert (short == -1).all()

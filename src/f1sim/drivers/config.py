@@ -25,11 +25,13 @@ class Settings:
     env: de.EnvConfig
     weights: np.ndarray  # (terms,) reward weight per term, the reward scale included
     styles: dict  # the profile's multiplier per style term
-    start_from: str  # the profile whose stage A networks this one starts from ("": from scratch)
     stage_a: dict
     stage_b: dict
     preset: dict
     reward_scale: float = 1.0  # [rewards] scale: the weighted sum x this (already in `weights`)
+    warm_start: dict = None  # [warm_start]: fill (share of the replay), critic_steps and actor_ramp (gradient steps), for a run from a checkpoint
+    stage_c: dict = None  # [stage_c]: what differs from [stage_b] in stage C (team orders) and D
+    stage_d: dict = None  # [stage_d]: what differs from [stage_c] in stage D (the personalities)
 
 
 def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
@@ -40,7 +42,7 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
         raise ValueError(f"no preset {preset!r} in drivers.toml (have: {', '.join(shared['preset'])})")
     p = shared["preset"][preset]
     t, e = shared["tqc"], shared["encoder"]
-    encoder = EncoderSpec(lidar_beams=de.LIDAR_BEAMS, conv=tuple(tuple(c) for c in e["conv"]), other_hidden=tuple(e["other_hidden"]))
+    encoder = EncoderSpec(lidar_beams=de.LIDAR_BEAMS, lidar_channels=de.LIDAR_CHANNELS, conv=tuple(tuple(c) for c in e["conv"]), other_hidden=tuple(e["other_hidden"]), bf16=bool(e.get("bf16", False)))
     cfg = TQCConfig(
         obs_dim=de.OBS,
         act_dim=de.ACTIONS,
@@ -57,6 +59,7 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
         actor_hidden=tuple(t["actor_hidden"]),
         critic_hidden=tuple(t["critic_hidden"]),
         init_alpha=t["init_alpha"],
+        shared_encoder=bool(t.get("shared_encoder", False)),
     )
     ev = shared["env"]
     env = de.EnvConfig(
@@ -69,6 +72,9 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
         time_factor=ev["time_factor"],
         worn=tuple(ev["worn"]),
         race=de.EnvConfig().race._replace(respawn=bool(ev.get("respawn", True))),
+        sensor_noise=float(ev.get("sensor_noise", 0.0)),
+        crash_left_km=float(ev.get("crash_left_km", 0.0)),
+        march_steps=int(ev.get("march_steps", de.MARCH_STEPS)),
     )
     unknown = set(own.get("weights", {})) - set(rewards.STYLES)
     if unknown:
@@ -87,9 +93,11 @@ def load(profile: str, preset: str = "laptop", configs=CONFIGS) -> Settings:
         env=env,
         weights=rewards.weights(base, styles, scale),
         styles=styles,
-        start_from=own.get("start_from", ""),
         stage_a=shared["stage_a"],
         stage_b=shared["stage_b"],
         preset=p,
         reward_scale=scale,
+        warm_start=dict(shared["warm_start"]),
+        stage_c=dict(shared.get("stage_c", {})),
+        stage_d=dict(shared.get("stage_d", {})),
     )

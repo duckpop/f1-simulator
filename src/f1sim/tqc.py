@@ -23,7 +23,7 @@ import optax
 from . import nets
 from .nets import EncoderSpec
 
-METRICS = ("critic_loss", "actor_loss", "alpha", "entropy", "q")
+METRICS = ("critic_loss", "actor_loss", "alpha", "entropy", "q", "spread")
 
 
 class TQCConfig(NamedTuple):
@@ -37,11 +37,14 @@ class TQCConfig(NamedTuple):
     n_step: int = 5
     target_entropy: float = -2.0  # H0
     lr: float = 3e-4
+    actor_lr: float = 0.0  # the actor's own learning rate (0: lr); the critics and the temperature keep lr
     batch: int = 256
     tau: float = 0.005
     actor_hidden: tuple = (256, 256)
     critic_hidden: tuple = (512, 512, 512)
     kappa: float = 1.0  # quantile Huber loss
+    shared_encoder: bool = False  # one encoder for all the critics (`nets.share_encoder`, since 2026-11-24): ~10% faster gradient steps, less independent critics
+    disagree: float = 0.0  # the actor rates an action at the critics' mean less disagree x their spread (the std of the N critics' means): untried actions, where the critics' guesses differ, rate lower; 0: off
     init_alpha: float = 1.0
 
     @property
@@ -76,7 +79,7 @@ def _adam(cfg: TQCConfig | None):
 def init(key, cfg: TQCConfig) -> TQCState:
     k_actor, k_critic = jax.random.split(key)
     actor = nets.actor_init(k_actor, cfg.encoder, cfg.obs_dim, cfg.act_dim, cfg.actor_hidden)
-    critic = nets.ensemble_init(k_critic, cfg.critics, cfg.encoder, cfg.obs_dim, cfg.act_dim, cfg.critic_hidden, cfg.quantiles)
+    critic = nets.ensemble_init(k_critic, cfg.critics, cfg.encoder, cfg.obs_dim, cfg.act_dim, cfg.critic_hidden, cfg.quantiles, cfg.shared_encoder)
     log_alpha = jnp.log(jnp.asarray(cfg.init_alpha, jnp.float32))
     opt = _adam(cfg)
     return TQCState(actor, critic, jax.tree.map(jnp.copy, critic), log_alpha, opt.init(actor), opt.init(critic), opt.init(log_alpha), jnp.zeros((), jnp.int32))
@@ -88,19 +91,6 @@ def from_networks(cfg: TQCConfig, actor, critic, target=None, log_alpha=None) ->
     log_alpha = jnp.log(jnp.asarray(cfg.init_alpha, jnp.float32)) if log_alpha is None else jnp.asarray(log_alpha, jnp.float32)
     opt = _adam(cfg)
     return TQCState(actor, critic, target, log_alpha, opt.init(actor), opt.init(critic), opt.init(log_alpha), jnp.zeros((), jnp.int32))
-
-
-def rescale(s: TQCState, factor: float) -> TQCState:
-    """The same agent for rewards x `factor`: the critics' outputs (their last layer is linear) and the temperature
-    scale with the reward, so the actor's loss keeps its shape. The critics' optimiser starts afresh (its moments were
-    for the old scale)."""
-
-    def scaled(net):
-        last = net["head"][-1]
-        return {**net, "head": net["head"][:-1] + [{"w": last["w"] * factor, "b": last["b"] * factor}]}
-
-    critic = scaled(s.critic)
-    return s._replace(critic=critic, target=scaled(s.target), log_alpha=s.log_alpha + jnp.log(jnp.asarray(factor, jnp.float32)), critic_opt=_adam(None).init(critic))
 
 
 def act(actor, cfg: TQCConfig, obs, key, mean: bool = False):
@@ -128,9 +118,17 @@ def quantile_huber(z, target, kappa: float = 1.0):
     return jnp.mean(weight * huber / kappa)
 
 
-def update(s: TQCState, cfg: TQCConfig, batch: Batch, key, actor_on=True):
+def update(s: TQCState, cfg: TQCConfig, batch: Batch, key, actor_on=True, target_entropy=None):
     """One gradient step on the critics, then the actor, then the temperature; then the target critics (Polyak).
-    actor_on (traced): False keeps the actor, the temperature and their optimisers as they were (a critic warm-up)."""
+    actor_on (traced): False (or 0) keeps the actor and the temperature as they were (a critic warm-up), while their
+    Adam moments still follow the current gradients, so the first steps after the warm-up are sized for the critics
+    as they are by then (frozen moments from before it let the actor's first steps run far past the ramp: the stage A
+    driver fell apart 2k steps after a 200k-step warm-up, 2026-11-07); a share in (0, 1] scales their steps, as a
+    lower learning rate would (the ramp after the warm-up). target_entropy (traced): the temperature's target in
+    place of cfg.target_entropy (a target moved gradually over a run). cfg.actor_lr scales the actor's steps the
+    same way (Adam's step is linear in its learning rate), so the actor moves less per update than the critics.
+"""
+    share = jnp.clip(jnp.asarray(actor_on, jnp.float32), 0.0, 1.0)
     k_next, k_now = jax.random.split(key)
     enc = cfg.encoder
     obs, next_obs = batch.obs.astype(jnp.float32), batch.next_obs.astype(jnp.float32)
@@ -151,24 +149,28 @@ def update(s: TQCState, cfg: TQCConfig, batch: Batch, key, actor_on=True):
     step, critic_opt = opt.update(grads, s.critic_opt, s.critic)
     critic = optax.apply_updates(s.critic, step)
 
-    # actor: the mean over every critic's every quantile, less the entropy term
+    # actor: the mean over every critic's every quantile, less disagree x the critics' spread, less the entropy term
     def actor_loss(p):
         a, logp = nets.actor_sample(p, enc, obs, k_now)
-        q = jnp.mean(nets.ensemble(critic, enc, obs, a), axis=(0, 2))
-        return jnp.mean(alpha * logp - q), (logp, q)
+        per_critic = jnp.mean(nets.ensemble(critic, enc, obs, a), axis=2)  # (N, B)
+        q, spread = jnp.mean(per_critic, axis=0), jnp.std(per_critic, axis=0)
+        rated = q - cfg.disagree * spread if cfg.disagree else q  # no penalty: no spread in the gradient
+        loss = jnp.mean(alpha * logp - rated)
+        return loss, (logp, q, spread)
 
-    (a_loss, (logp, q)), grads = jax.value_and_grad(actor_loss, has_aux=True)(s.actor)
+    (a_loss, (logp, q, spread)), grads = jax.value_and_grad(actor_loss, has_aux=True)(s.actor)
     step, actor_opt = opt.update(grads, s.actor_opt, s.actor)
-    actor = optax.apply_updates(s.actor, step)
+    slower = (cfg.actor_lr / cfg.lr) if cfg.actor_lr else 1.0
+    actor = optax.apply_updates(s.actor, jax.tree.map(lambda x: share * slower * x, step))
 
     # temperature: towards the target entropy
-    gap = jax.lax.stop_gradient(jnp.mean(logp) + cfg.target_entropy)
+    gap = jax.lax.stop_gradient(jnp.mean(logp) + (cfg.target_entropy if target_entropy is None else target_entropy))
     grad = -gap  # d/d(log alpha) of -log_alpha * gap
     step, alpha_opt = opt.update(grad, s.alpha_opt, s.log_alpha)
-    log_alpha = optax.apply_updates(s.log_alpha, step)
+    log_alpha = optax.apply_updates(s.log_alpha, share * step)
 
-    keep = lambda new, old: jax.tree.map(lambda n, o: jnp.where(actor_on, n, o), new, old)
-    actor, actor_opt, log_alpha, alpha_opt = keep((actor, actor_opt, log_alpha, alpha_opt), (s.actor, s.actor_opt, s.log_alpha, s.alpha_opt))
+    keep = lambda new, old: jax.tree.map(lambda n, o: jnp.where(share > 0, n, o), new, old)
+    actor, log_alpha = keep((actor, log_alpha), (s.actor, s.log_alpha))  # the optimisers' moments always move on
     target_net = jax.tree.map(lambda t, c: (1.0 - cfg.tau) * t + cfg.tau * c, s.target, critic)
-    metrics = {"critic_loss": c_loss, "actor_loss": a_loss, "alpha": alpha, "entropy": -jnp.mean(logp), "q": jnp.mean(q)}
+    metrics = {"critic_loss": c_loss, "actor_loss": a_loss, "alpha": alpha, "entropy": -jnp.mean(logp), "q": jnp.mean(q), "spread": jnp.mean(spread)}
     return TQCState(actor, critic, target_net, log_alpha, actor_opt, critic_opt, alpha_opt, s.updates + 1), metrics

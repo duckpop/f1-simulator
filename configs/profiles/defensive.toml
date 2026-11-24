@@ -2,15 +2,18 @@ description = "Keeping position: inside line first, blocks space, tighter lines 
 drop = 2                    # 10 of 125
 target_entropy = -2.0
 gamma = 0.992               # ~125 steps, 6.3 s (was 0.990)
-start_from = "middle"
 
 [weights]
 overtake = 0.5
 place_lost = 1.8            # -45 (was 2 of -20, -40)
 holding = 2.0
 inside_line = 1.0
-tyre_wear = 1.0
+tyre_wear = 0.3             # -3 per % over the rated wear (user, 2026-11-22; was 0.5, 1.0 until 2026-11-20)
 smoothness = 1.0
+car_close = 2.0  # gives room rather than risk contact
+wall_close = 1.5
 
 [rewards]                   # this profile's own base values (replacing drivers.toml's)
+slip = -0.1667             # a third of the base -0.5 (user, 2026-11-22): sliding at the limit costs less, so pushing pays
+time = -0.6                 # per step racing in a race: pace matters, less than keeping its place (2026-11-20)
 crash = -3000.0             # more careful: keeping the place matters more than any one move (was -150)

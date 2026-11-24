@@ -6,7 +6,8 @@
 - Weather: wets when rain arrives within a lap (the exact forecast) or it's raining; slicks (mediums) when the track
   will be dry enough within a lap. One stop covers both a worn set and a weather change.
 - Compound: the next-harder at each dry stop (soft -> medium -> hard, hard -> medium); a car still on one dry compound
-  in a dry race comes in from the second-to-last lap (the two-compound rule).
+  in a dry race comes in from the second-to-last lap (the two-compound rule; a race under `two_compound_km` is
+  exempt).
 - Pace normal, no team orders, ERS "deploy": set once at the start of each race (`fixed_orders`).
 
 It decides once a second, like f1env's principal; a standing call is changed only when the weather changes the
@@ -39,9 +40,9 @@ def slick_crossover(p: ty.TyreParams) -> float:
     return (dry_m - dry_w) / ((dry_m - wet_m) - (dry_w - wet_w))
 
 
-def calls(bank, state, worn_at, cfg: RaceConfig = RaceConfig()):
+def calls(bank, state, worn_at, cfg: RaceConfig = RaceConfig(), two_compound_km: float = 0.0):
     """(R, C) pit calls for `f1env.race.pit_orders`: -1 (no change) or 1 + compound. worn_at: (R, C) this stint's
-    threshold."""
+    threshold. two_compound_km: races shorter than this don't need the second compound (no stop unless worn)."""
     total = bank.length[state.tid][:, None]
     leader_lap = (jnp.max(jnp.floor(state.line / total), axis=-1) + 1).astype(jnp.int32)
     last_lap = (leader_lap >= state.target_laps)[:, None]
@@ -59,7 +60,8 @@ def calls(bank, state, worn_at, cfg: RaceConfig = RaceConfig()):
     at_entry = t.life - ty.wear_per_km(t, cfg.tyres) * (to_entry + 0.5 * total) / 1000.0
     worn = ((t.life <= worn_at) | (at_entry <= worn_at)) & ~last_lap
     wrong_tyres = wet_track != on_wets
-    second_compound = ~w.rained[:, None] & ~ty.two_compounds(t) & ~on_wets & late
+    long_enough = (state.target_laps * bank.length[state.tid] >= two_compound_km * 1000.0)[:, None]
+    second_compound = ~w.rained[:, None] & ~ty.two_compounds(t) & ~on_wets & late & long_enough
     want = 1 + jnp.where(wet_track, ty.WET, jnp.asarray(NEXT_HARDER)[t.compound])
 
     p = state.pits

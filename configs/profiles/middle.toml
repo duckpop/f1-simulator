@@ -2,12 +2,18 @@ description = "The best blend of pace, consistency, tyre care and controlled ove
 drop = 2                    # d per critic: 10 of 125 atoms dropped
 target_entropy = -2.0       # H0
 gamma = 0.994               # ~167 steps, 8.3 s (was 0.995)
-start_from = ""
 
 [weights]                   # x each style term's base value
 overtake = 1.0
 place_lost = 1.0
 holding = 1.0
 inside_line = 0.0
-tyre_wear = 1.0
+tyre_wear = 0.3             # -3 per % over the rated wear (user, 2026-11-22; was 1.0): push the tyres harder
 smoothness = 1.0
+car_close = 1.0
+wall_close = 1.0
+
+[rewards]                   # this profile's own base values (replacing drivers.toml's)
+slip = -0.1667             # a third of the base -0.5 (user, 2026-11-22): sliding at the limit costs less, so pushing pays
+time = -0.7                 # per step racing in a race, so finishing sooner pays: between Aggressive (-0.8) and
+                            # Defensive (-0.6); without it run sc2 drove 17% slower than the lap sim alone (2026-11-20)
