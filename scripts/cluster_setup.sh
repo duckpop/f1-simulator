@@ -35,18 +35,20 @@ echo "f1-simulator $(git -C "$SIM" rev-parse --short HEAD) ($SIM_BRANCH); f1env 
 
 cd "$SIM"
 mkdir -p runs  # the training job writes its SLURM output there (it must exist before the job starts)
-if command -v uv >/dev/null; then
-    [ -d .venv ] || uv venv --python ">=3.11"
-    uv pip install --python .venv/bin/python -e "$ENVDIR"
-    uv pip install --python .venv/bin/python --no-deps -e .   # f1env is already in: not fetched again over ssh
-    uv pip install --python .venv/bin/python "jax[cuda12]>=0.4.35" "optax>=0.2.3" "numpy>=1.26" "pytest>=8"
-else
-    [ -d .venv ] || python3 -m venv .venv
-    .venv/bin/pip install -q --upgrade pip
-    .venv/bin/pip install -q -e "$ENVDIR"
-    .venv/bin/pip install -q --no-deps -e .
-    .venv/bin/pip install -q "jax[cuda12]>=0.4.35" "optax>=0.2.3" "numpy>=1.26" "pytest>=8"
+# f1env needs Python >= 3.11; the system's may be older. uv fetches its own Python 3.12 when there's none: uv is
+# installed for this user with pip if it's missing (no root needed).
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v uv >/dev/null; then
+    python3 -m pip install --user -q uv || { echo "couldn't install uv with pip: install it (https://docs.astral.sh/uv) or load a Python >= 3.11 module"; exit 1; }
 fi
+if [ -x .venv/bin/python ] && ! .venv/bin/python -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+    echo "removing .venv: its Python $(.venv/bin/python -V 2>&1) is older than 3.11"
+    rm -rf .venv
+fi
+[ -d .venv ] || uv venv --python 3.12
+uv pip install --python .venv/bin/python -e "$ENVDIR"
+uv pip install --python .venv/bin/python --no-deps -e .   # f1env is already in: not fetched again over ssh
+uv pip install --python .venv/bin/python "jax[cuda12]>=0.4.35" "optax>=0.2.3" "numpy>=1.26" "pytest>=8"
 .venv/bin/python -c "import f1sim, f1env, jax; print('installed: f1sim', f1sim.__file__, '| f1env', f1env.__file__, '| jax', jax.__version__)"
 
 # a few tests on the CPU (the GPU is checked at the start of the training job)
