@@ -570,7 +570,7 @@ def main(argv=None):
             print(f"{name:>10}: best so far {evaluate.summary_mixed(bar)}")
 
     def run_eval(league, n: int):
-        """The eval weekend at step n: logs it, saves latest.npz and, if it beats the bar, best.npz (the current actor)
+        """The eval weekend at step n: logs it, saves evals/eval-<n>.npz = latest.npz and, if it beats the bar, best.npz (the current actor)
         and bests/best-<n>.npz (the averaged actor the eval drove); with snapshot_on "best" (and n > 0) that driver
         replaces the oldest snapshot of its own personality. Returns the league."""
         drivers = averaged if avg_share else [ag.actor for ag in league.agents]
@@ -582,14 +582,14 @@ def main(argv=None):
         for i, (s, ag) in enumerate(zip(settings, league.agents)):
             r = res["profiles"][s.profile]
             meta = {"profile": s.profile, "preset": a.preset, **eval_meta, "env_steps": n, "eval": r, "reward_scale": s.reward_scale, **prov}
-            checkpoint.save(outs[s.profile] / "latest.npz", ag, meta)  # the current actor, to carry on from
-            if avg_share:  # ... and the averaged one beside it, for --resume
+            if avg_share:  # the averaged actor beside the current one, for --resume
                 checkpoint.save(outs[s.profile] / "latest-averaged.npz", ag._replace(actor=drivers[i]), {**meta, "actor": "averaged"})
             improved = evaluate.better_ordered(r, best[s.profile], orders.get(s.profile, evaluate.DEFAULT_ORDER))  # the profile's own checks, in its order
+            # evals/eval-<n> (the last 10) = latest.npz, the current actor to carry on from; on a best also best.npz and
+            # bests/best-<n> (the last 5): the averaged actor the eval drove, or the same file without averaging
+            checkpoint.save_eval(outs[s.profile], n, ag, meta, improved, ag._replace(actor=drivers[i]) if avg_share else None, {**meta, "actor": "averaged"})
             if improved:
                 best[s.profile] = r
-                checkpoint.save(outs[s.profile] / "best.npz", ag, meta)  # the current actor (the eval drove the averaged one)
-                checkpoint.save(outs[s.profile] / "bests" / f"best-{n}.npz", ag._replace(actor=drivers[i]), {**meta, "actor": "averaged"})
                 slot = oldest_slot(owners, ages, s.profile)
                 if snap_on == "best" and n > start and slot is not None:  # the first eval's driver is the starting checkpoint
                     league = push_snapshot(league, slot, drivers[i])

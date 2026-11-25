@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -43,6 +46,49 @@ def save(path, agent, meta: dict | None = None):
     tmp = path.with_name(path.name + ".tmp.npz")
     np.savez(tmp, meta=np.array(json.dumps(meta or {})), **{f"a{i}": a for i, a in enumerate(leaves)})
     tmp.replace(path)  # never a half-written checkpoint
+
+
+KEEP_EVALS, KEEP_BESTS = 10, 5  # each stage keeps its last 10 evals' checkpoints and its last 5 bests (user, 2026-11-25)
+
+
+def link(src, dst):
+    """dst becomes the same file as src (a hard link: no extra disk; a copy where links don't work). save() always
+    writes a new file, so overwriting one name never changes the others."""
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".tmp.npz")
+    tmp.unlink(missing_ok=True)
+    try:
+        os.link(src, tmp)
+    except OSError:
+        shutil.copy2(src, tmp)
+    tmp.replace(dst)
+
+
+def keep_last(folder, prefix: str, keep: int):
+    """Deletes all but the newest `keep` of folder/<prefix>-<steps>.npz (by the step count)."""
+    pat = re.compile(rf"{re.escape(prefix)}-(\d+)\.npz")
+    found = sorted((int(m.group(1)), p) for p in Path(folder).glob(f"{prefix}-*.npz") if (m := pat.fullmatch(p.name)))
+    for _, p in found[:-keep] if keep > 0 else found:
+        p.unlink()
+
+
+def save_eval(out, n: int, agent, meta: dict, improved: bool, best_agent=None, best_meta: dict | None = None):
+    """An eval's checkpoints in a stage folder `out`: evals/eval-<n>.npz (the last KEEP_EVALS kept), latest.npz the
+    same file; if `improved`, best.npz too and bests/best-<n>.npz (the last KEEP_BESTS kept): `best_agent` (the
+    averaged actor the eval drove) when given, else the same file again."""
+    out = Path(out)
+    ev = out / "evals" / f"eval-{n}.npz"
+    save(ev, agent, meta)
+    link(ev, out / "latest.npz")
+    keep_last(out / "evals", "eval", KEEP_EVALS)
+    if improved:
+        link(ev, out / "best.npz")
+        if best_agent is None:
+            link(ev, out / "bests" / f"best-{n}.npz")
+        else:
+            save(out / "bests" / f"best-{n}.npz", best_agent, best_meta if best_meta is not None else meta)
+        keep_last(out / "bests", "best", KEEP_BESTS)
 
 
 def meta(path) -> dict:

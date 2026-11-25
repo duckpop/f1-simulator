@@ -178,11 +178,10 @@ def main(argv=None):
             r = evaluate.alone(eval_bank, carry.agent.actor, s.tqc, p["eval_laps"], p["eval_seeds"], weights=weights)
             log({"kind": "eval", "env_steps": n, **r})
             info_ckpt = {**meta, "env_steps": n, "eval": r}
-            checkpoint.save(out / "latest.npz", carry.agent, info_ckpt)
             improved = evaluate.better(r, best)
+            checkpoint.save_eval(out, n, carry.agent, info_ckpt, improved)  # evals/ (last 10), latest, best, bests/ (last 5)
             if improved:
                 best, stale = r, 0
-                checkpoint.save(out / "best.npz", carry.agent, info_ckpt)
             elif best["finish_rate"] > 0:  # "stops improving" only counts once cars finish races
                 stale += 1
             note = "  (best)" if improved else (f"  (no better: {stale}/{patience or 'no limit'})" if best["finish_rate"] > 0 else "  (no better; nothing finishes yet)")
