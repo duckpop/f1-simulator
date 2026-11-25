@@ -19,16 +19,17 @@
 # 15 minutes before the time limit SLURM sends SIGTERM: the trainer stops after its current chunk and saves
 # latest.npz, so CONTINUE=1 picks up from there.
 #
-# Adjust the #SBATCH lines to your cluster (the partition or account, the GPU type).
+# Set for the openlab cluster (2026-11-25): partition openlab-queue (1 day max, nodes with 4 GPUs), account
+# openlab-korisnici, one GPU of any type (the nodes list theirs as gpu:standard).
 #SBATCH --job-name=f1-train
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00
 #SBATCH --signal=B:TERM@900
 #SBATCH --output=runs/slurm-%j.out
-# #SBATCH --partition=<your GPU partition>
-# #SBATCH --account=<your account>
+#SBATCH --partition=openlab-queue
+#SBATCH --account=openlab-korisnici
 set -euo pipefail
 
 STAGE=${1:-${STAGE:-}}

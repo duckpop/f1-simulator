@@ -4,15 +4,16 @@
 #
 #   cd ~/f1/f1-simulator && sbatch scripts/cluster_check.slurm
 #
-# Adjust the #SBATCH lines to your cluster (the partition or account, the GPU type).
+# Set for the openlab cluster (2026-11-25): partition openlab-queue (1 day max, nodes with 4 GPUs), account
+# openlab-korisnici, one GPU of any type (the nodes list theirs as gpu:standard).
 #SBATCH --job-name=f1-check
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=01:00:00
 #SBATCH --output=runs/slurm-%j.out
-# #SBATCH --partition=<your GPU partition>
-# #SBATCH --account=<your account>
+#SBATCH --partition=openlab-queue
+#SBATCH --account=openlab-korisnici
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p runs
